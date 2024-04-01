@@ -1,4 +1,4 @@
-#### installations:
+## installations:
 
 `conda env create -f requirements.yml`
 
@@ -9,6 +9,8 @@
 
 To train and evaluate use:
 `python run.py --class_index 283 --train True  --evaluate True`
+or run the shell script:
+`bash run.sh`
 
-#### Hyperparameters:
-The hyperparameters can be changed in the `config.py` script. Note that the paper results are based on stable-diffusion version 1.4.
+## Hyperparameters:
+The hyperparameters can be changed in the `config.py` script.
