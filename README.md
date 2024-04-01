@@ -8,7 +8,7 @@
 ## Run and Evaluate:
 
 To train and evaluate use:
-`python run.py --class_index 283 --train True  --evaluate True`
+`python o2m_run.py --class_index 283 --train True  --evaluate True`
 or run the shell script:
 `bash run.sh`
 
