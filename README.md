@@ -2,7 +2,7 @@
 
 `conda env create -f requirements.yml`
 
-`conda activate discriminative-token`
+`conda activate df_synthesis`
 
 
 ## Run and Evaluate:
