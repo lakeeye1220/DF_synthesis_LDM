@@ -1,4 +1,4 @@
-name: discriminative-token
+name: df_synthesis
 channels:
   - anaconda
   - conda-forge
