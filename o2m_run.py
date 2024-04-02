@@ -18,20 +18,20 @@ import numpy as np
 
 def train(config: RunConfig):
     # A range of imagenet classes to run on
-    start_class_idx = config.class_index
-    stop_class_idx = config.class_index
+    start_class_idx = config.class_index # 283
+    stop_class_idx = config.class_index # 283
 
     # Classification model
-    classification_model = utils.prepare_classifier(config)
+    classification_model = utils.prepare_classifier(config) # ViT for IC
 
-    current_early_stopping = RunConfig.early_stopping
+    current_early_stopping = RunConfig.early_stopping # 15
 
     exp_identifier = (
         f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
         f"{config.seed}_{config.number_of_prompts}_{config.early_stopping}"
-    )
+    ) # 'demo_2.1_20_0.005_35_1_15'
 
-    if config.classifier == "inet":
+    if config.classifier == "inet": # True
         IDX2NAME = IDX2NAME_INET
     else:
         IDX2NAME = classification_model.config.id2label
@@ -46,7 +46,7 @@ def train(config: RunConfig):
         if running_class_index > stop_class_idx:
             break
 
-        class_name = class_name.split(",")[0]
+        class_name = class_name.split(",")[0] # tiger_cat
         print(f"Start training class token for {class_name}")
         img_dir_path = f"img/{class_name}/train"
         if Path(img_dir_path).exists():
@@ -57,11 +57,11 @@ def train(config: RunConfig):
         unet, vae, text_encoder, scheduler, tokenizer = utils.prepare_stable(config)
 
         # Extend tokenizer and add a discriminative token ###
-        class_infer = config.class_index - 1
-        prompt_suffix = " ".join(class_name.lower().split("_"))
+        class_infer = config.class_index - 1 # 282
+        prompt_suffix = " ".join(class_name.lower().split("_")) # tiger cat"
 
         ## Add the placeholder token in tokenizer
-        num_added_tokens = tokenizer.add_tokens(config.placeholder_token)
+        num_added_tokens = tokenizer.add_tokens(config.placeholder_token) # 1
         if num_added_tokens == 0:
             raise ValueError(
                 f"The tokenizer already contains the token {config.placeholder_token}. Please pass a different"
@@ -71,22 +71,22 @@ def train(config: RunConfig):
         ## Get token ids for our placeholder and initializer token.
         # This code block will complain if initializer string is not a single token
         ## Convert the initializer_token, placeholder_token to ids
-        token_ids = tokenizer.encode(config.initializer_token, add_special_tokens=False)
+        token_ids = tokenizer.encode(config.initializer_token, add_special_tokens=False) # [320]
         # Check if initializer_token is a single token or a sequence of tokens
         if len(token_ids) > 1:
             raise ValueError("The initializer token must be a single token.")
 
-        initializer_token_id = token_ids[0]
+        initializer_token_id = token_ids[0] # 320
         print("token id shape :",len(token_ids))
         print("initizlizer token shape : ",initializer_token_id)
-        placeholder_token_id = tokenizer.convert_tokens_to_ids(config.placeholder_token)
+        placeholder_token_id = tokenizer.convert_tokens_to_ids(config.placeholder_token) # 49408
 
         # we resize the token embeddings here to account for placeholder_token
-        text_encoder.resize_token_embeddings(len(tokenizer))
+        text_encoder.resize_token_embeddings(len(tokenizer)) # after : token embedding size (49409, 1024) (before : (49408, 1024))
 
         #  Initialise the newly added placeholder token
-        token_embeds = text_encoder.get_input_embeddings().weight.data
-        token_embeds[placeholder_token_id] = token_embeds[initializer_token_id]
+        token_embeds = text_encoder.get_input_embeddings().weight.data # [49409, 1024]
+        token_embeds[placeholder_token_id] = token_embeds[initializer_token_id] # [1024] (shape)
 
         # Define dataloades
 
@@ -111,7 +111,7 @@ def train(config: RunConfig):
             epoch_size=config.epoch_size,
         )
 
-        train_batch_size = config.batch_size
+        train_batch_size = config.batch_size # 1
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=train_batch_size,
@@ -151,13 +151,13 @@ def train(config: RunConfig):
             mixed_precision=config.mixed_precision,
         )
 
-        if config.gradient_checkpointing:
+        if config.gradient_checkpointing: # True
             text_encoder.gradient_checkpointing_enable()
             unet.enable_gradient_checkpointing()
 
         text_encoder, optimizer, train_dataloader = accelerator.prepare(
             text_encoder, optimizer, train_dataloader
-        )
+        ) # CLIPTextModel, Accelerated optimizaer, accelerate.data_loader 
 
         weight_dtype = torch.float32
         if accelerator.mixed_precision == "fp16":
@@ -169,8 +169,8 @@ def train(config: RunConfig):
         vae.to(accelerator.device, dtype=weight_dtype)
         unet.to(accelerator.device, dtype=weight_dtype)
 
-        classification_model = classification_model.to(accelerator.device)
-        text_encoder = text_encoder.to(accelerator.device)
+        classification_model = classification_model.to(accelerator.device) # ViT for IC
+        text_encoder = text_encoder.to(accelerator.device) # CLIPTextmodel
 
         # Keep vae in eval mode as we don't train it
         vae.eval()
@@ -191,7 +191,7 @@ def train(config: RunConfig):
             unet.config.in_channels,
             config.height // 8,
             config.width // 8,
-        )
+        ) # (1, 4, 4, 64)
 
         if config.skip_exists and os.path.isfile(token_path):
             print(f"Token already exist at {token_path}")
@@ -209,13 +209,14 @@ def train(config: RunConfig):
                     classification_loss = None
                     with accelerator.accumulate(text_encoder):
                         # Get the text embedding for conditioning
-                        encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                        encoder_hidden_states = text_encoder(batch["input_ids"])[0] # (1, 8, 1024)
                         #print("encoder_hiddne states : ",encoder_hidden_states.shape) # 1 8 1024
+                        # batch["input_ids"] = [49406,   320,  1125,   539, 49408,  6531,  2368, 49407]
 
                         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
                         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
                         # corresponds to doing no classifier free guidance.
-                        do_classifier_free_guidance = config.guidance_scale > 1.0
+                        do_classifier_free_guidance = config.guidance_scale > 1.0 # True / guidance_scale : 7
 
                         # get unconditional embeddings for classifier free guidance
                         if do_classifier_free_guidance:
@@ -225,27 +226,27 @@ def train(config: RunConfig):
                                 padding="max_length",
                                 max_length=max_length,
                                 return_tensors="pt",
-                            )
+                            ) # shape : (1, 8), value : [49406, 49407,     0,     0,     0,     0,     0,     0]
                             uncond_embeddings = text_encoder(
                                 uncond_input.input_ids.to(config.device)
-                            )[0]
+                            )[0] # (1, 8, 1024)
 
                             # For classifier free guidance, we need to do two forward passes.
                             # Here we concatenate the unconditional and text embeddings into
                             # a single batch to avoid doing two forward passes.
                             encoder_hidden_states = torch.cat(
                                 [uncond_embeddings, encoder_hidden_states]
-                            )
+                            ) # (2, 8, 1024)
                         encoder_hidden_states = encoder_hidden_states.to(
                             dtype=weight_dtype
                         )
                         init_latent = torch.randn(
                             latents_shape, generator=generator, device="cuda"
-                        ).to(dtype=weight_dtype)
+                        ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
 
                         latents = init_latent
                         scheduler.set_timesteps(config.num_of_SD_inference_steps)
-                        grad_update_step = config.num_of_SD_inference_steps - 1
+                        grad_update_step = config.num_of_SD_inference_steps - 1 # 29
 
                         # generate image
                         for i, t in enumerate(scheduler.timesteps):
@@ -255,12 +256,12 @@ def train(config: RunConfig):
                                         torch.cat([latents] * 2)
                                         if do_classifier_free_guidance
                                         else latents
-                                    )
+                                    ) # (2, 4, 64, 64)
                                     noise_pred = unet(
                                         latent_model_input,
                                         t,
                                         encoder_hidden_states=encoder_hidden_states,
-                                    ).sample
+                                    ).sample # (2, 4, 64, 64)
 
                                     # perform guidance
                                     if do_classifier_free_guidance:
@@ -272,22 +273,22 @@ def train(config: RunConfig):
                                             noise_pred_uncond
                                             + config.guidance_scale
                                             * (noise_pred_text - noise_pred_uncond)
-                                        )
+                                        ) # (1, 4, 64, 64)
 
                                     latents = scheduler.step(
                                         noise_pred, t, latents
-                                    ).prev_sample
+                                    ).prev_sample # (1, 4, 64, 64)
                             else:
                                 latent_model_input = (
                                     torch.cat([latents] * 2)
                                     if do_classifier_free_guidance
                                     else latents
-                                )
+                                ) # (2, 4, 64, 64)
                                 noise_pred = unet(
                                     latent_model_input,
                                     t,
                                     encoder_hidden_states=encoder_hidden_states,
-                                ).sample
+                                ).sample # (1, 4, 64, 64)
                                 # perform guidance
                                 if do_classifier_free_guidance:
                                     (
@@ -305,15 +306,15 @@ def train(config: RunConfig):
                                 ).prev_sample
                                 # scale and decode the image latents with vae
 
-                        latents_decode = 1 / 0.18215 * latents
-                        image = vae.decode(latents_decode).sample
-                        image = (image / 2 + 0.5).clamp(0, 1)
+                        latents_decode = 1 / 0.18215 * latents # (1, 4, 64, 64)
+                        image = vae.decode(latents_decode).sample # (1, 3, 512, 512)
+                        image = (image / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
 
                         image_out = image
 
-                        image = utils.transform_img_tensor(image, config)
-                        image = torch.nn.functional.interpolate(image, size=224)
-                        output = classification_model(image).logits
+                        image = utils.transform_img_tensor(image, config) # (1, 3, 224, 224)
+                        image = torch.nn.functional.interpolate(image, size=224) # (1, 3, 224, 224)
+                        output = classification_model(image).logits # [1, 1000]
 
                         if classification_loss is None:
                             classification_loss = criterion(
@@ -525,6 +526,7 @@ def evaluate(config: RunConfig):
 
 
 if __name__ == "__main__":
+    print(RunConfig)
     config = pyrallis.parse(config_class=RunConfig)
 
     # Check the arguments
