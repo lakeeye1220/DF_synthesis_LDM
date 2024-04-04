@@ -55,19 +55,19 @@ def prepare_classifier(config):
 
         model = ViTForImageClassification.from_pretrained(
             "google/vit-large-patch16-224"
-        ).cuda()
+        ).to(config.device)
     elif config.classifier == "cub":
         from vitmae import CustomViTForImageClassification
 
         model = CustomViTForImageClassification.from_pretrained(
             "vesteinn/vit-mae-cub"
-        ).cuda()
+        ).to(config.device)
     elif config.classifier == "inat":
         from vitmae import CustomViTForImageClassification
 
         model = CustomViTForImageClassification.from_pretrained(
             "vesteinn/vit-mae-inat21"
-        ).cuda()
+        ).to(config.device)
 
     return model
 
@@ -86,9 +86,7 @@ def prepare_stable(config):
         pretrained_model_name_or_path, subfolder="text_encoder"
     )
     vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, subfolder="vae")
-    pipe = StableDiffusionPipeline.from_pretrained(pretrained_model_name_or_path).to(
-        "cuda"
-    )
+    pipe = StableDiffusionPipeline.from_pretrained(pretrained_model_name_or_path).to(config.device)
     scheduler = pipe.scheduler
     del pipe
     tokenizer = CLIPTokenizer.from_pretrained(

@@ -144,7 +144,7 @@ def train(config: RunConfig):
             eps=config.eps,
         )
         print("text encoder shape :",text_encoder.get_input_embeddings().parameters())
-        criterion = torch.nn.CrossEntropyLoss().cuda()
+        criterion = torch.nn.CrossEntropyLoss().to(config.device)
 
         accelerator = Accelerator(
             gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -241,7 +241,7 @@ def train(config: RunConfig):
                             dtype=weight_dtype
                         )
                         init_latent = torch.randn(
-                            latents_shape, generator=generator, device="cuda"
+                            latents_shape, generator=generator, device=config.device
                         ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
 
                         latents = init_latent
@@ -318,11 +318,11 @@ def train(config: RunConfig):
 
                         if classification_loss is None:
                             classification_loss = criterion(
-                                output, torch.LongTensor([class_infer]).cuda()
+                                output, torch.LongTensor([class_infer]).to(config.device)
                             )
                         else:
                             classification_loss += criterion(
-                                output, torch.LongTensor([class_infer]).cuda()
+                                output, torch.LongTensor([class_infer]).to(config.device)
                             )
 
                         pred_class = torch.argmax(output).item()
@@ -463,8 +463,8 @@ def evaluate(config: RunConfig):
     prompt_suffix = " ".join(class_name.lower().split("_"))
 
     domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
-    confidence_list = []
     for descriptive_token in tokens_to_try:
+        confidence_list = []
         correct = 0
         #prompt = f"A photo of {descriptive_token} {prompt_suffix}"
         #print(f"Evaluation for the prompt: {prompt}")
@@ -488,9 +488,13 @@ def evaluate(config: RunConfig):
             image_out = pipe(prompt, output_type="pt", generator=generator)[0]
             image = utils.transform_img_tensor(image_out, config)
             image = torch.nn.functional.interpolate(image, size=224)
+            print(type(image))
+            print('image.shape :', image.shape)
             output = classification_model(image).logits
             pred_probs = torch.nn.functional.softmax(output,dim=1)
+            print('pred_probs.shape :',pred_probs.shape)
             confidence = pred_probs[:,class_index].mean().item()
+            print('class_index :',class_index)
             print("confidence : ",confidence)
             confidence_list.append(confidence)
             pred_class = torch.argmax(output).item()
@@ -526,6 +530,8 @@ def evaluate(config: RunConfig):
 
 
 if __name__ == "__main__":
+    # import os
+    # os.environ["CUDA_VISIBLE_DEVICES"]= "3"
     print(RunConfig)
     config = pyrallis.parse(config_class=RunConfig)
 
