@@ -47,8 +47,10 @@ class RunConfig:
     num_of_SD_inference_steps: int = 30
 
     # Discrimnative tokens
-    placeholder_token: str = "newclas"
-    initializer_token: str = "a"
+    domain_placeholder_token: str = "dmtk"
+    class_placeholder_token: str = "clstk"
+    domain_initializer_token: str = "domain"
+    class_initializer_token: str = "class"
 
     # Path to save all outputs to
     output_path: Path = Path("results")

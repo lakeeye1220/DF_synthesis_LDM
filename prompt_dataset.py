@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 
 
 imagenet_templates_small = [
-    "A photo of {}",
+    "A {} of {}",
     #"a high resolution realistic image of {}",
     #"A close-up photo of a {}",
     #"A rendition of a {}",
@@ -44,7 +44,8 @@ class PromptDataset(Dataset):
 
     def __init__(
         self,
-        placeholder_token,
+        domain_placeholder_token,
+        class_placeholder_token,
         prompt_suffix,
         tokenizer,
         epoch_size,
@@ -52,7 +53,8 @@ class PromptDataset(Dataset):
     ):
         self.prompt_suffix = prompt_suffix
         self.tokenizer = tokenizer
-        self.placeholder_token = placeholder_token
+        self.domain_placeholder_token = domain_placeholder_token
+        self.class_placeholder_token = class_placeholder_token
         self.epoch_size = epoch_size
         self.number_of_prompts = number_of_prompts
 
@@ -62,7 +64,7 @@ class PromptDataset(Dataset):
     def __getitem__(self, index):
         example = {}
         text = imagenet_templates_small[index % self.number_of_prompts]
-        text = text.format(self.placeholder_token)
+        text = text.format(self.domain_placeholder_token, self.class_placeholder_token)
         text += f" {self.prompt_suffix}"
         example["instance_prompt"] = text
         example["instance_prompt_ids"] = self.tokenizer(

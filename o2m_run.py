@@ -61,32 +61,37 @@ def train(config: RunConfig):
         prompt_suffix = " ".join(class_name.lower().split("_")) # tiger cat"
 
         ## Add the placeholder token in tokenizer
-        num_added_tokens = tokenizer.add_tokens(config.placeholder_token) # 1
+        num_added_tokens = tokenizer.add_tokens([config.domain_placeholder_token, config.class_placeholder_token]) # 1
         if num_added_tokens == 0:
             raise ValueError(
-                f"The tokenizer already contains the token {config.placeholder_token}. Please pass a different"
-                " `placeholder_token` that is not already in the tokenizer."
+                f"The tokenizer already contains the token {[config.domain_placeholder_token, config.class_placeholder_token]}. Please pass a different"
+                " `domain_placeholder_token` or `class_placeholder_token` that are not already in the tokenizer."
             )
 
         ## Get token ids for our placeholder and initializer token.
         # This code block will complain if initializer string is not a single token
-        ## Convert the initializer_token, placeholder_token to ids
-        token_ids = tokenizer.encode(config.initializer_token, add_special_tokens=False) # [320]
+        ## Convert the initializer_token, domain_placeholder_token and class_placeholder_token to ids
+        domain_init_token_ids = tokenizer.encode(config.domain_initializer_token, add_special_tokens=False) # [320]
+        class_init_token_ids = tokenizer.encode(config.class_initializer_token, add_special_tokens=False) # [320]
         # Check if initializer_token is a single token or a sequence of tokens
-        if len(token_ids) > 1:
+        if len(domain_init_token_ids) > 1 or len(class_init_token_ids) > 1:
             raise ValueError("The initializer token must be a single token.")
 
-        initializer_token_id = token_ids[0] # 320
-        print("token id shape :",len(token_ids))
-        print("initizlizer token shape : ",initializer_token_id)
-        placeholder_token_id = tokenizer.convert_tokens_to_ids(config.placeholder_token) # 49408
+        domain_initializer_token_id = domain_init_token_ids[0] # 518
+        class_initializer_token_id = class_init_token_ids[0] # 320
 
-        # we resize the token embeddings here to account for placeholder_token
+        print("domain_initizlizer token : ",domain_initializer_token_id)
+        print("class_initizlizer token : ",class_initializer_token_id)
+        domain_placeholder_token_id = tokenizer.convert_tokens_to_ids(config.domain_placeholder_token) # 49408
+        class_placeholder_token_id = tokenizer.convert_tokens_to_ids(config.class_placeholder_token) # 49408
+
+        # we resize the token embeddings here to account for class_placeholder_token
         text_encoder.resize_token_embeddings(len(tokenizer)) # after : token embedding size (49409, 1024) (before : (49408, 1024))
 
         #  Initialise the newly added placeholder token
         token_embeds = text_encoder.get_input_embeddings().weight.data # [49409, 1024]
-        token_embeds[placeholder_token_id] = token_embeds[initializer_token_id] # [1024] (shape)
+        token_embeds[domain_placeholder_token_id] = token_embeds[domain_initializer_token_id] # [1024] (shape)
+        token_embeds[class_placeholder_token_id] = token_embeds[class_initializer_token_id] # [1024] (shape)
 
         # Define dataloades
 
@@ -106,7 +111,8 @@ def train(config: RunConfig):
         train_dataset = prompt_dataset.PromptDataset(
             prompt_suffix=prompt_suffix,
             tokenizer=tokenizer,
-            placeholder_token=config.placeholder_token,
+            domain_placeholder_token=config.domain_placeholder_token,
+            class_placeholder_token=config.class_placeholder_token,
             number_of_prompts=config.number_of_prompts,
             epoch_size=config.epoch_size,
         )
@@ -366,7 +372,7 @@ def train(config: RunConfig):
 
                         # Get the index for tokens that we want to zero the grads for
                         index_grads_to_zero = (
-                            torch.arange(len(tokenizer)) != placeholder_token_id
+                            torch.arange(len(tokenizer)) != class_placeholder_token_id
                         )
                         grads.data[index_grads_to_zero, :] = grads.data[
                             index_grads_to_zero, :
@@ -446,7 +452,7 @@ def evaluate(config: RunConfig):
     pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}_{class_name}"
     pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
 
-    tokens_to_try = [config.placeholder_token]
+    tokens_to_try = [config.class_placeholder_token]
     # Create eval dir
     img_dir_path = f"img/{class_name}/eval"
     if Path(img_dir_path).exists():
@@ -455,14 +461,17 @@ def evaluate(config: RunConfig):
             print("baseline exists - skip it. Set 'skip_exists' to False regenerate.")
         else:
             shutil.rmtree(img_dir_path)
-            tokens_to_try.append(config.initializer_token)
+            tokens_to_try.append(config.domain_initializer_token)
+            tokens_to_try.append(config.class_initializer_token)
     else:
-        tokens_to_try.append(config.initializer_token)
+        tokens_to_try.append(config.domain_initializer_token)
+        tokens_to_try.append(config.class_initializer_token)
 
     Path(img_dir_path).mkdir(parents=True, exist_ok=True)
     prompt_suffix = " ".join(class_name.lower().split("_"))
 
-    domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
+    # domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
+    domain_prompts = [config.domain_placeholder_token]
     for descriptive_token in tokens_to_try:
         confidence_list = []
         correct = 0
@@ -526,7 +535,7 @@ def evaluate(config: RunConfig):
         plt.ylabel('Confidence score')
         for i, value in enumerate(confidence_list):
             plt.text(i, value + 10, str(value), ha='center', va='bottom')
-        plt.savefig(f'./A domain of {descriptive_token} {prompt_suffix} confidece score.pdf')
+        plt.savefig(f'./A domain of {descriptive_token} {prompt_suffix} confidece score.jpg')
 
 
 if __name__ == "__main__":
