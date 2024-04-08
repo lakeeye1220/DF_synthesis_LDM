@@ -62,7 +62,7 @@ class RunConfig:
     gradient_checkpointing = True
 
     # evaluate
-    test_size: int = 1
+    test_size: int = 20
 
 
 def __post_init__(self):

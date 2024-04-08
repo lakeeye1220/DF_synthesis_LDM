@@ -16,6 +16,8 @@ import shutil
 import matplotlib.pyplot as plt
 import numpy as np
 
+import wandb
+custom_root = "run_test_for_1216"
 def train(config: RunConfig):
     # A range of imagenet classes to run on
     start_class_idx = config.class_index # 283
@@ -48,7 +50,7 @@ def train(config: RunConfig):
 
         class_name = class_name.split(",")[0] # tiger_cat
         print(f"Start training class token for {class_name}")
-        img_dir_path = f"img/{class_name}/train"
+        img_dir_path = f"img/{class_name}/{custom_root}/train"
         if Path(img_dir_path).exists():
             shutil.rmtree(img_dir_path)
         Path(img_dir_path).mkdir(parents=True, exist_ok=True)
@@ -210,6 +212,8 @@ def train(config: RunConfig):
                 )  # Seed generator to create the inital latent noise
                 generator.manual_seed(config.seed)
                 correct = 0
+                examples_latent = []
+                examples_image = []
                 for step, batch in enumerate(train_dataloader):
                     # setting the generator here means we update the same images
                     classification_loss = None
@@ -284,6 +288,15 @@ def train(config: RunConfig):
                                     latents = scheduler.step(
                                         noise_pred, t, latents
                                     ).prev_sample # (1, 4, 64, 64)
+                                    if step == 0:
+                                        latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
+                                        image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
+                                        image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
+                                        example_latent = wandb.Image(utils.numpy_to_pil(
+                                image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
+                            )[0], caption=f"latent_{i}")
+                                        examples_latent.append(example_latent)
+                                        
                             else:
                                 latent_model_input = (
                                     torch.cat([latents] * 2)
@@ -310,8 +323,18 @@ def train(config: RunConfig):
                                 latents = scheduler.step(
                                     noise_pred, t, latents
                                 ).prev_sample
-                                # scale and decode the image latents with vae
 
+                                if step==0:
+                                    latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
+                                    image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
+                                    image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
+                                    example_latent = wandb.Image(utils.numpy_to_pil(
+                                        image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
+                                        )[0], caption=f"latent_{i}")
+                                    examples_latent.append(example_latent)
+                                    
+                                # scale and decode the image latents with vae
+                        wandb.log({"latents" : examples_latent})
                         latents_decode = 1 / 0.18215 * latents # (1, 4, 64, 64)
                         image = vae.decode(latents_decode).sample # (1, 3, 512, 512)
                         image = (image / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
@@ -333,7 +356,7 @@ def train(config: RunConfig):
 
                         pred_class = torch.argmax(output).item()
                         total_loss += classification_loss.detach().item()
-
+                        wandb.log({"train_batch_loss" : classification_loss.detach().item()})
                         # log
                         txt = f"On epoch {epoch} \n"
                         with torch.no_grad():
@@ -421,12 +444,19 @@ def train(config: RunConfig):
                             print(
                                 f"{current_early_stopping} steps to stop, current best {min_loss}"
                             )
-
+                                
                             total_loss = 0
                             global_step += 1
+                        if step == 0:
+                            example_image = wandb.Image(utils.numpy_to_pil(
+                                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                                )[0], caption=f"{epoch}_image")
+                            examples_image.append(example_image)
+                    wandb.log({"examples_image" : examples_image})
+                    
                 print(f"Current accuracy {correct / config.epoch_size}")
-
-                if (correct / config.epoch_size > 0.7) or current_early_stopping < 0:
+                wandb.log({"Current accuracy" : correct / config.epoch_size})
+                if (correct / config.epoch_size > 0.85) or current_early_stopping < 0:
                     break
 
 
@@ -456,7 +486,7 @@ def evaluate(config: RunConfig):
 
     tokens_to_try = [config.class_placeholder_token] # ["clstk"]
     # Create eval dir
-    img_dir_path = f"img/{class_name}/eval"
+    img_dir_path = f"img/{class_name}/{custom_root}/eval"
     if Path(img_dir_path).exists():
         print("Img path exists {img_dir_path}")
         if config.skip_exists:
@@ -474,6 +504,7 @@ def evaluate(config: RunConfig):
 
     # domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
     domain_prompts = [config.domain_placeholder_token] # ["dmtk"]
+    eval_img_list = []
     for descriptive_token in tokens_to_try:
         confidence_list = []
         correct = 0
@@ -481,7 +512,7 @@ def evaluate(config: RunConfig):
         #print(f"Evaluation for the prompt: {prompt}")
 
         for seed in range(config.test_size):
-            prompt = f"A {domain_prompts[seed]} of {descriptive_token} {prompt_suffix}"
+            prompt = f"A {domain_prompts[0]} of {descriptive_token} {prompt_suffix}"
             print(f"Evaluation for the prompt: {prompt}")
             print('descriptive_token :',descriptive_token)
             print('config.class_initializer_token :',config.class_initializer_token)
@@ -523,13 +554,15 @@ def evaluate(config: RunConfig):
                     f"{img_dir_path}/{seed}_{exp_identifier}_{IDX2NAME[pred_class]}.jpg"
                 )
 
-            utils.numpy_to_pil(image_out.permute(0, 2, 3, 1).cpu().detach().numpy())[
-                0
-            ].save(img_path, "JPEG")
-
+            utils.numpy_to_pil(image_out.permute(0, 2, 3, 1).cpu().detach().numpy())[0].save(img_path, "JPEG")
+            eval_img = wandb.Image(utils.numpy_to_pil(
+                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                )[0], caption=f"image_{seed}")
+            eval_img_list.append(eval_img)
             if pred_class == class_index:
                 correct += 1
             print(f"Image class: {IDX2NAME[pred_class]}")
+        wandb.log({"eval_img_list" : eval_img_list})
         acc = correct / config.test_size
         print(
             f"-----------------------Accuracy {descriptive_token} {acc}-----------------------------"
@@ -544,6 +577,7 @@ def evaluate(config: RunConfig):
 
 
 if __name__ == "__main__":
+    wandb.init(project="o2m_run_test",entity='gustn9609')
     # import os
     # os.environ["CUDA_VISIBLE_DEVICES"]= "3"
     print(RunConfig)
