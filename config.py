@@ -20,7 +20,7 @@ class RunConfig:
 
     # Affect training time
     early_stopping: int = 15
-    num_train_epochs: int = 50
+    num_train_epochs: int = 20
 
     # affect variability of the training images
     # i.e., also sets batch size with accumulation
@@ -62,7 +62,7 @@ class RunConfig:
     gradient_checkpointing = True
 
     # evaluate
-    test_size: int = 10
+    test_size: int = 1
 
 
 def __post_init__(self):
