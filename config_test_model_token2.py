@@ -10,7 +10,7 @@ class RunConfig:
     evaluate: bool
 
     # Id of the experiment
-    exp_id: str = "demo"
+    exp_id: str = "demo_test_model_token2"
 
     # Whether to use Stable Diffusion v2.1
     sd_2_1: bool = True
@@ -47,9 +47,9 @@ class RunConfig:
     num_of_SD_inference_steps: int = 30
 
     # Discrimnative tokens
-    domain_placeholder_token: str = "mdtk"
+    model_placeholder_token: str = "mdtk"
     class_placeholder_token: str = "clstk"
-    domain_initializer_token: str = "domain"
+    model_initializer_token: str = "model"
     class_initializer_token: str = "class"
 
     # Path to save all outputs to

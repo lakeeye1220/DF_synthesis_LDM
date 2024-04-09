@@ -6,18 +6,18 @@ import torch.utils.checkpoint
 import itertools
 from accelerate import Accelerator
 from diffusers import StableDiffusionPipeline
-import prompt_dataset
+import prompt_dataset_test_model_token
 import utils
 from inet_classes import IDX2NAME as IDX2NAME_INET
 
-from config import RunConfig
+from config_test_model_token import RunConfig
 import pyrallis
 import shutil
 import matplotlib.pyplot as plt
 import numpy as np
 
 import wandb
-custom_root = "run_test_for_1216"
+custom_root = "run_test_for_model_token"
 def train(config: RunConfig):
     # A range of imagenet classes to run on
     start_class_idx = config.class_index # 283
@@ -63,28 +63,28 @@ def train(config: RunConfig):
         prompt_suffix = " ".join(class_name.lower().split("_")) # tiger cat"
 
         ## Add the placeholder token in tokenizer
-        num_added_tokens = tokenizer.add_tokens([config.domain_placeholder_token, config.class_placeholder_token]) # 1
+        num_added_tokens = tokenizer.add_tokens([config.model_placeholder_token, config.class_placeholder_token]) # 1
         if num_added_tokens == 0:
             raise ValueError(
-                f"The tokenizer already contains the token {[config.domain_placeholder_token, config.class_placeholder_token]}. Please pass a different"
-                " `domain_placeholder_token` or `class_placeholder_token` that are not already in the tokenizer."
+                f"The tokenizer already contains the token {[config.model_placeholder_token, config.class_placeholder_token]}. Please pass a different"
+                " `model_placeholder_token` or `class_placeholder_token` that are not already in the tokenizer."
             )
 
         ## Get token ids for our placeholder and initializer token.
         # This code block will complain if initializer string is not a single token
-        ## Convert the initializer_token, domain_placeholder_token and class_placeholder_token to ids
-        domain_init_token_ids = tokenizer.encode(config.domain_initializer_token, add_special_tokens=False) # [320]
+        ## Convert the initializer_token, model_placeholder_token and class_placeholder_token to ids
+        model_init_token_ids = tokenizer.encode(config.model_initializer_token, add_special_tokens=False) # [320]
         class_init_token_ids = tokenizer.encode(config.class_initializer_token, add_special_tokens=False) # [320]
         # Check if initializer_token is a single token or a sequence of tokens
-        if len(domain_init_token_ids) > 1 or len(class_init_token_ids) > 1:
+        if len(model_init_token_ids) > 1 or len(class_init_token_ids) > 1:
             raise ValueError("The initializer token must be a single token.")
 
-        domain_initializer_token_id = domain_init_token_ids[0] # 518
+        model_initializer_token_id = model_init_token_ids[0] # 518
         class_initializer_token_id = class_init_token_ids[0] # 320
 
-        print("domain_initizlizer token : ",domain_initializer_token_id)
+        print("model_initializer token : ",model_initializer_token_id)
         print("class_initizlizer token : ",class_initializer_token_id)
-        domain_placeholder_token_id = tokenizer.convert_tokens_to_ids(config.domain_placeholder_token) # 49408
+        model_placeholder_token_id = tokenizer.convert_tokens_to_ids(config.model_placeholder_token) # 49408
         class_placeholder_token_id = tokenizer.convert_tokens_to_ids(config.class_placeholder_token) # 49408
 
         # we resize the token embeddings here to account for class_placeholder_token
@@ -92,7 +92,7 @@ def train(config: RunConfig):
 
         #  Initialise the newly added placeholder token
         token_embeds = text_encoder.get_input_embeddings().weight.data # [49409, 1024]
-        token_embeds[domain_placeholder_token_id] = token_embeds[domain_initializer_token_id] # [1024] (shape)
+        token_embeds[model_placeholder_token_id] = token_embeds[model_initializer_token_id] # [1024] (shape)
         token_embeds[class_placeholder_token_id] = token_embeds[class_initializer_token_id] # [1024] (shape)
 
         # Define dataloades
@@ -110,10 +110,10 @@ def train(config: RunConfig):
 
             return batch
 
-        train_dataset = prompt_dataset.PromptDataset(
+        train_dataset = prompt_dataset_test_model_token.PromptDataset(
             prompt_suffix=prompt_suffix,
             tokenizer=tokenizer,
-            domain_placeholder_token=config.domain_placeholder_token,
+            model_placeholder_token=config.model_placeholder_token,
             class_placeholder_token=config.class_placeholder_token,
             number_of_prompts=config.number_of_prompts,
             epoch_size=config.epoch_size,
@@ -192,7 +192,7 @@ def train(config: RunConfig):
         # Define token output dir
         token_dir_path = f"token/{class_name}"
         Path(token_dir_path).mkdir(parents=True, exist_ok=True)
-        token_path = f"{token_dir_path}/{exp_identifier}"
+        token_path = f"{token_dir_path}/{exp_identifier}_{class_name}"
 
         latents_shape = (
             config.batch_size,
@@ -213,7 +213,7 @@ def train(config: RunConfig):
                     device=config.device
                 )  # Seed generator to create the inital latent noise
                 generator.manual_seed(config.seed)
-                correct = 0
+                correct = 0    
                 for step, batch in enumerate(train_dataloader):
                     # setting the generator here means we update the same images
                     classification_loss = None
@@ -456,7 +456,7 @@ def train(config: RunConfig):
                 wandb.log({"latents" : examples_latent})
                 print(f"Current accuracy {correct / config.epoch_size}")
                 wandb.log({"Current accuracy" : correct / config.epoch_size})
-                if (correct / config.epoch_size) > 0.8: # or current_early_stopping < 0:
+                if (correct / config.epoch_size > 0.9):
                     break
 
 
@@ -480,7 +480,7 @@ def evaluate(config: RunConfig):
     # Stable model
     token_dir_path = f"token/{class_name}"
     Path(token_dir_path).mkdir(parents=True, exist_ok=True)
-    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
+    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}_{class_name}"
     print("pipe_path :",pipe_path)
     pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
 
@@ -493,17 +493,17 @@ def evaluate(config: RunConfig):
             print("baseline exists - skip it. Set 'skip_exists' to False regenerate.")
         else:
             shutil.rmtree(img_dir_path)
-            tokens_to_try.append(config.domain_initializer_token)
+            tokens_to_try.append(config.model_initializer_token)
             tokens_to_try.append(config.class_initializer_token)
     else:
-        tokens_to_try.append(config.domain_initializer_token)
+        tokens_to_try.append(config.model_initializer_token)
         tokens_to_try.append(config.class_initializer_token) # 질문 : tokens_to_try에 이런게 다 담기는게 맞나..?
 
     Path(img_dir_path).mkdir(parents=True, exist_ok=True)
     prompt_suffix = " ".join(class_name.lower().split("_")) # tiger cat
 
-    # domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
-    domain_prompts = [config.domain_placeholder_token] # ["dmtk"]
+    # model_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
+    model_prompts = [config.model_placeholder_token] # ["dmtk"]
     eval_img_list = []
     for descriptive_token in tokens_to_try:
         confidence_list = []
@@ -512,12 +512,12 @@ def evaluate(config: RunConfig):
         #print(f"Evaluation for the prompt: {prompt}")
 
         for seed in range(config.test_size):
-            prompt = f"A {domain_prompts[0]} of {descriptive_token} {prompt_suffix}"
+            prompt = f"A photo of {descriptive_token} {prompt_suffix} from {model_prompts[0]}"
             print(f"Evaluation for the prompt: {prompt}")
             print('descriptive_token :',descriptive_token)
             print('config.class_initializer_token :',config.class_initializer_token)
-            print('config.domain_initializer_token :',config.domain_initializer_token)
-            if descriptive_token == config.domain_initializer_token:
+            print('config.model_initializer_token :',config.model_initializer_token)
+            if descriptive_token == config.model_initializer_token:
                 img_id = f"{img_dir_path}/{seed}_{descriptive_token}_{prompt_suffix}"
                 if os.path.exists(f"{img_id}_correct.jpg") or os.path.exists(
                     f"{img_id}_wrong.jpg"
@@ -544,7 +544,7 @@ def evaluate(config: RunConfig):
             confidence_list.append(confidence)
             pred_class = torch.argmax(output).item()
 
-            if descriptive_token == config.domain_initializer_token:
+            if descriptive_token == config.model_initializer_token:
                 img_path = (
                     f"{img_dir_path}/{descriptive_token}_{prompt_suffix}"
                     f"_{'correct' if pred_class == config.class_index else 'wrong'}.jpg"
@@ -567,13 +567,13 @@ def evaluate(config: RunConfig):
         print(
             f"-----------------------Accuracy {descriptive_token} {acc}-----------------------------"
         )
-        plt.bar(np.arange(len(domain_prompts)),confidence_list,color='navy')
-        plt.xticks(np.arange(len(domain_prompts)),domain_prompts,rotation=45)
-        plt.title("Confidence score of different domain images")
+        plt.bar(np.arange(len(model_prompts)),confidence_list,color='navy')
+        plt.xticks(np.arange(len(model_prompts)),model_prompts,rotation=45)
+        plt.title("Confidence score of different model images")
         plt.ylabel('Confidence score')
         for i, value in enumerate(confidence_list):
             plt.text(i, value + 10, str(value), ha='center', va='bottom')
-        plt.savefig(f'./A domain of {descriptive_token} {prompt_suffix} confidece score.jpg')
+        plt.savefig(f'./A model of {descriptive_token} {prompt_suffix} confidece score.jpg')
 
 
 if __name__ == "__main__":
