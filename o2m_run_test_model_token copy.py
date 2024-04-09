@@ -476,7 +476,7 @@ def evaluate(config: RunConfig):
         f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
         f"{config.number_of_prompts}_{config.early_stopping}"
     )
-
+    class_name = "tiger cat"
     # Stable model
     token_dir_path = f"token/{class_name}"
     Path(token_dir_path).mkdir(parents=True, exist_ok=True)
@@ -500,7 +500,7 @@ def evaluate(config: RunConfig):
         pass
         # tokens_to_try.append(config.model_initializer_token)
         # tokens_to_try.append(config.class_initializer_token) # 질문 : tokens_to_try에 이런게 다 담기는게 맞나..?
-
+    class_name = "mail box"
     Path(img_dir_path).mkdir(parents=True, exist_ok=True)
     prompt_suffix = " ".join(class_name.lower().split("_")) # tiger cat
 
