@@ -234,8 +234,6 @@ def train(config: RunConfig):
             return
         else:
             for running_class_index, class_name in IDX2NAME.items():
-                if running_class_index ==10:
-                    break
                 classification_loss = None
                 generator = torch.Generator(
                     device=config.device
