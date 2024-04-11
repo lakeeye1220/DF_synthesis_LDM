@@ -444,7 +444,7 @@ def train(config: RunConfig):
             # wandb.log({"latents" : examples_latent})
             print(f"Current accuracy {correct / config.epoch_size}")
             wandb.log({"Current accuracy" : correct / config.epoch_size})
-            if (correct / config.epoch_size > 0.8) or current_early_stopping < 0:
+            if (correct / config.epoch_size > 0.8):
                 break
 
 

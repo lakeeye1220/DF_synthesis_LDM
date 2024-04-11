@@ -19,12 +19,12 @@ class RunConfig:
     classifier: str = "inet"
 
     # Affect training time
-    early_stopping: int = 1
-    num_train_epochs: int = 1
+    early_stopping: int = 10
+    num_train_epochs: int = 1000
 
     # affect variability of the training images
     # i.e., also sets batch size with accumulation
-    epoch_size: int = 1
+    epoch_size: int = 1000
     number_of_prompts: int = 1  #3 how many different prompts to use
     batch_size: int = 1  # set to one due to gpu constraints
     gradient_accumulation_steps: int = 20  # same as the epoch size
