@@ -3,14 +3,17 @@ import torch
 import os
 from pathlib import Path
 import torch.utils.checkpoint
+from  torch.cuda.amp import autocast
 import itertools
 from accelerate import Accelerator
 from diffusers import StableDiffusionPipeline
-import prompt_dataset_hs
+import new_class_prompt_dataset
 import utils
-from inet_classes import IDX2NAME as IDX2NAME_INET
+from inet_classes import IDX2NAME as IDX2NAME_cls
+from inet_classes import CLS2IDX as CLS2IDX_cls
+import torchvision
 
-from config_hs import RunConfig
+from new_class_config_hs import RunConfig
 import pyrallis
 import shutil
 import matplotlib.pyplot as plt
@@ -18,11 +21,14 @@ import numpy as np
 import random
 
 import wandb
-
+label_lst = ["n01498041","n02066245","n02749479","n03481172","n03676483","n01534433","n02091032","n02992529","n03498962","n04552348"]
 def train(config: RunConfig):
     # Classification model
-    classification_model = utils.prepare_classifier(config) # ViT for IC
-
+    classification_model = torchvision.models.resnet50(pretrained=True)
+    classification_model.fc = torch.nn.Linear(2048,config.class_num)
+    classification_model.load_state_dict(torch.load(config.model_PATH))
+    classification_model.eval()
+    
     current_early_stopping = RunConfig.early_stopping # 15
 
     exp_identifier = (
@@ -30,10 +36,10 @@ def train(config: RunConfig):
         f"{config.number_of_prompts}_{config.early_stopping}"
     ) # 'demo_2.1_20_0.005_35_1_15'
 
-    if config.classifier == "inet": # True
-        IDX2NAME = IDX2NAME_INET
-    else:
-        IDX2NAME = classification_model.config.id2label
+    IDX2NAME = IDX2NAME_cls
+    CLS2IDX = CLS2IDX_cls
+    category = config.model_PATH.split("_")[-2]
+    print(f'classifier category is {category}')
 
     #### Train ####
     print(f"Start experiment {exp_identifier}")
@@ -95,7 +101,7 @@ def train(config: RunConfig):
         }
         return batch
 
-    train_dataset = prompt_dataset_hs.PromptDataset(
+    train_dataset = new_class_prompt_dataset.PromptDataset(
         tokenizer=tokenizer,
         model_placeholder_token=config.model_placeholder_token,
         number_of_prompts=config.number_of_prompts,
@@ -325,137 +331,142 @@ def train(config: RunConfig):
 
                     image = utils.transform_img_tensor(image, config) # (1, 3, 224, 224)
                     image = torch.nn.functional.interpolate(image, size=224) # (1, 3, 224, 224)
-                    output = classification_model(image).logits # [1, 1000]
+                    # output = classification_model(image).logits # [1, 1000]
+                    with autocast():
+                        output = classification_model.forward(image)
+                    print('class_infer :',class_infer)
+                    print('label_lst[class_infer] :',label_lst[class_infer])
+                    print('CLS2IDX_cls[label_lst[class_infer]] :',CLS2IDX_cls[label_lst[class_infer]])
+                    print('IDX2NAME_cls[CLS2IDX_cls[label_lst[class_infer]]] :',IDX2NAME_cls[CLS2IDX_cls[label_lst[class_infer]]])
                     pred_probs = torch.nn.functional.softmax(output,dim=1)
                     confidence = pred_probs[:,class_infer].mean().item()
-                    if confidence > 0.7:
-                        print(f"Current image's confidence score is {confidence} so do not train with this image")
-                        correct += 1
+                    print('pred_probs :',pred_probs)
+                    print(f"Current image's confidence score is {confidence}")
+                          
+                    if classification_loss is None:
+                        classification_loss = criterion(
+                            output, torch.LongTensor([class_infer]).to(config.device)
+                        )
                     else:
-                        print(f"Current image's confidence score is {confidence} so train with this image")
-                        if classification_loss is None:
-                            classification_loss = criterion(
-                                output, torch.LongTensor([class_infer]).to(config.device)
-                            )
-                        else:
-                            classification_loss += criterion(
-                                output, torch.LongTensor([class_infer]).to(config.device)
-                            )
-
-                        pred_class = torch.argmax(output).item()
-                        total_loss += classification_loss.detach().item()
-                        wandb.log({"train_batch_loss" : classification_loss.detach().item()})
-                        # log
-                        txt = f"On epoch {epoch} \n"
-                        with torch.no_grad():
-                            txt += f"{batch['texts']} \n"
-                            txt += f"Desired class: {IDX2NAME[class_infer]}, \n"
-                            txt += f"Image class: {IDX2NAME[pred_class]}, \n"
-                            txt += f"Loss: {classification_loss.detach().item()}"
-                            with open("run_log.txt", "a") as f:
-                                print(txt, file=f)
-                            print(txt)
-                            utils.numpy_to_pil(
-                                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
-                            )[0].save(
-                                f"{img_dir_path}/{epoch}_{IDX2NAME[pred_class]}_{classification_loss.detach().item()}.jpg",
-                                "JPEG",
-                            )
-
-                        if pred_class == class_infer:
-                            correct += 1
-
-                        torch.nn.utils.clip_grad_norm_(
-                            text_encoder.get_input_embeddings().parameters(),
-                            config.max_grad_norm,
+                        classification_loss += criterion(
+                            output, torch.LongTensor([class_infer]).to(config.device)
                         )
 
-                        accelerator.backward(classification_loss)
-
-                        # Zero out the gradients for all token embeddings except the newly added
-                        # embeddings for the concept, as we only want to optimize the concept embeddings
-                        if accelerator.num_processes > 1:
-                            grads = (
-                                text_encoder.module.get_input_embeddings().weight.grad
-                            )
-                        else:
-                            grads = text_encoder.get_input_embeddings().weight.grad
-
-                        # Get the index for tokens that we want to zero the grads for
-                        index_grads_to_zero = (
-                            torch.arange(len(tokenizer)) != model_placeholder_token_id
+                    pred_class = torch.argmax(output).item()
+                    total_loss += classification_loss.detach().item()
+                    wandb.log({"train_batch_loss" : classification_loss.detach().item()})
+                    # log
+                    txt = f"On epoch {epoch} \n"
+                    with torch.no_grad():
+                        txt += f"{batch['texts']} \n"
+                        txt += f"Desired class: {IDX2NAME_cls[CLS2IDX_cls[label_lst[class_infer]]]}, \n"
+                        txt += f"Image class: {IDX2NAME_cls[CLS2IDX_cls[label_lst[pred_class]]]}, \n"
+                        txt += f"Loss: {classification_loss.detach().item()}"
+                        with open("run_log.txt", "a") as f:
+                            print(txt, file=f)
+                        print(txt)
+                        utils.numpy_to_pil(
+                            image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                        )[0].save(
+                            f"{img_dir_path}/{epoch}_{IDX2NAME[pred_class]}_{classification_loss.detach().item()}.jpg",
+                            "JPEG",
                         )
-                        grads.data[index_grads_to_zero, :] = grads.data[
-                            index_grads_to_zero, :
-                        ].fill_(0)
 
-                        optimizer.step()
-                        optimizer.zero_grad()
+                    if pred_class == class_infer:
+                        correct += 1
 
-                        # Checks if the accelerator has performed an optimization step behind the scenes
-                        if accelerator.sync_gradients:
-                            if total_loss > 2 * min_loss:
-                                print("training collapse, try different hp")
-                                config.seed += 1
-                                print("updated seed", config.seed)
-                            print("update")
-                            if total_loss < min_loss:
-                                min_loss = total_loss
-                                current_early_stopping = config.early_stopping
-                                # Create the pipeline using the trained modules and save it.
-                                accelerator.wait_for_everyone()
-                                if accelerator.is_main_process:
-                                    print(
-                                        f"Saved the new discriminative class token pipeline of {IDX2NAME[class_infer]} to pipeline_{token_path}"
+                    torch.nn.utils.clip_grad_norm_(
+                        text_encoder.get_input_embeddings().parameters(),
+                        config.max_grad_norm,
+                    )
+
+                    accelerator.backward(classification_loss)
+
+                    # Zero out the gradients for all token embeddings except the newly added
+                    # embeddings for the concept, as we only want to optimize the concept embeddings
+                    if accelerator.num_processes > 1:
+                        grads = (
+                            text_encoder.module.get_input_embeddings().weight.grad
+                        )
+                    else:
+                        grads = text_encoder.get_input_embeddings().weight.grad
+
+                    # Get the index for tokens that we want to zero the grads for
+                    index_grads_to_zero = (
+                        torch.arange(len(tokenizer)) != model_placeholder_token_id
+                    )
+                    grads.data[index_grads_to_zero, :] = grads.data[
+                        index_grads_to_zero, :
+                    ].fill_(0)
+
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    if accelerator.sync_gradients:
+                        if total_loss > 2 * min_loss:
+                            print("training collapse, try different hp")
+                            config.seed += 1
+                            print("updated seed", config.seed)
+                        print("update")
+                        if total_loss < min_loss:
+                            min_loss = total_loss
+                            current_early_stopping = config.early_stopping
+                            # Create the pipeline using the trained modules and save it.
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                print(
+                                    f"Saved the new discriminative class token pipeline of {IDX2NAME[class_infer]} to pipeline_{token_path}"
+                                )
+                                if config.sd_2_1:
+                                    pretrained_model_name_or_path = (
+                                        "stabilityai/stable-diffusion-2-1-base"
                                     )
-                                    if config.sd_2_1:
-                                        pretrained_model_name_or_path = (
-                                            "stabilityai/stable-diffusion-2-1-base"
-                                        )
-                                    else:
-                                        pretrained_model_name_or_path = (
-                                            "CompVis/stable-diffusion-v1-4"
-                                        )
-                                    pipeline = StableDiffusionPipeline.from_pretrained(
-                                        pretrained_model_name_or_path,
-                                        text_encoder=accelerator.unwrap_model(
-                                            text_encoder
-                                        ),
-                                        vae=vae,
-                                        unet=unet,
-                                        tokenizer=tokenizer,
+                                else:
+                                    pretrained_model_name_or_path = (
+                                        "CompVis/stable-diffusion-v1-4"
                                     )
-                                    print("pipeline_{token_path} :", f"pipeline_{token_path}")
-                                    pipeline.save_pretrained(f"pipeline_{token_path}")
-                            else:
-                                current_early_stopping -= 1
-                            print(
-                                f"{current_early_stopping} steps to stop, current best {min_loss}"
-                            )
-                                
-                            total_loss = 0
-                            global_step += 1
-                        if step == 0:
-                            example_image = wandb.Image(utils.numpy_to_pil(
-                                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
-                                )[0], caption=f"{epoch}_image")
-                            examples_image.append(example_image)
+                                pipeline = StableDiffusionPipeline.from_pretrained(
+                                    pretrained_model_name_or_path,
+                                    text_encoder=accelerator.unwrap_model(
+                                        text_encoder
+                                    ),
+                                    vae=vae,
+                                    unet=unet,
+                                    tokenizer=tokenizer,
+                                )
+                                print("pipeline_{token_path} :", f"pipeline_{token_path}")
+                                pipeline.save_pretrained(f"pipeline_{token_path}")
+                        else:
+                            current_early_stopping -= 1
+                        print(
+                            f"{current_early_stopping} steps to stop, current best {min_loss}"
+                        )
+                            
+                        total_loss = 0
+                        global_step += 1
+                    if step == 0:
+                        example_image = wandb.Image(utils.numpy_to_pil(
+                            image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                            )[0], caption=f"{epoch}_image")
+                        examples_image.append(example_image)
                 
             # wandb.log({"examples_image" : examples_image})
             # wandb.log({"latents" : examples_latent})
             print(f"Current accuracy {correct / config.epoch_size}")
             wandb.log({"Current accuracy" : correct / config.epoch_size})
-            if (correct / config.epoch_size > 0.8) or current_early_stopping < 0:
+            if (correct / config.epoch_size > 0.9):
                 break
 
 
 def evaluate(config: RunConfig):
-    classification_model = utils.prepare_classifier(config)
 
-    if config.classifier == "inet":
-        IDX2NAME = IDX2NAME_INET
-    else:
-        IDX2NAME = classification_model.config.id2label
+    classification_model = torchvision.models.resnet50(pretrained=True)
+    classification_model.fc = torch.nn.Linear(2048,config.class_num)
+    classification_model.load_state_dict(torch.load(config.model_PATH))
+    classification_model.eval()
+    IDX2NAME = IDX2NAME_cls
+    CLS2IDX = CLS2IDX_cls
 
     exp_identifier = (
         f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
@@ -492,7 +503,7 @@ def evaluate(config: RunConfig):
         for seed in range(config.test_size):
             print('seed')
             idx = idx_lst[seed]
-            prompt_suffix = IDX2NAME_INET[idx].split(",")[0]
+            prompt_suffix = IDX2NAME_cls[idx].split(",")[0]
             prompt = f"A photo of {prompt_suffix} from {descriptive_token}"
             print(f"Evaluation for the prompt: {prompt}")
             if descriptive_token == config.model_initializer_token:

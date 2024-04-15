@@ -330,6 +330,7 @@ def train(config: RunConfig):
                     confidence = pred_probs[:,class_infer].mean().item()
                     if confidence > 0.7:
                         print(f"Current image's confidence score is {confidence} so do not train with this image")
+                        correct += 1
                     else:
                         print(f"Current image's confidence score is {confidence} so train with this image")
                         if classification_loss is None:
