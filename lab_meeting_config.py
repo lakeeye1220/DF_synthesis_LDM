@@ -17,10 +17,11 @@ class RunConfig:
 
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
     classifier: str = "inet"
-    model_PATH: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
+    # model_PATH: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
+    model_PATH: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_art_0.9436619718309859.pt"
     # Affect training time
-    early_stopping: int = 10
-    num_train_epochs: int = 20
+    early_stopping: int = 15
+    num_train_epochs: int = 50
 
     # affect variability of the training images
     # i.e., also sets batch size with accumulation
