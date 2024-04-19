@@ -175,9 +175,9 @@ def run(args):
     net_student=None
     if args.adi_scale != 0:
         net_student = net_verifier
-    best_image, image = DeepInversionEngine.generate_batch(net_student=net_student)
+    best_image = DeepInversionEngine.generate_batch(net_student=net_student)
 
-    return best_image, image
+    return best_image
 
 def main():
     parser = argparse.ArgumentParser()
