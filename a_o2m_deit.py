@@ -7,17 +7,18 @@ from  torch.cuda.amp import autocast
 import itertools
 from accelerate import Accelerator
 from diffusers import StableDiffusionPipeline
-import lab_meeting_deit_prompt_dataset
+import a_prompt_dataset_deit
 import utils
 from inet_classes import IDX2NAME as IDX2NAME_cls
 from inet_classes import CLS2IDX as CLS2IDX_cls
 import torchvision
+import torchvision.utils as vutils
 
-from transformers import BeitImageProcessor, BeitForImageClassification
+from transformers import BeitImageProcessor, BeitForImageClassification, ResNetForImageClassification
 from PIL import Image
 import requests
 
-from lab_meeting_deit_config import RunConfig
+from a_config_deit import RunConfig
 import pyrallis
 import shutil
 import matplotlib.pyplot as plt
@@ -25,19 +26,22 @@ import numpy as np
 import random
 from inversion_test import return_DDIM_latent
 import wandb
+import imagenet_inversion
+
 
 def train(config: RunConfig):
     print(label_lst)
     # Classification model
     # processor = BeitImageProcessor.from_pretrained('kmewhort/beit-sketch-classifier')
-    classification_model = BeitForImageClassification.from_pretrained('kmewhort/beit-sketch-classifier')
+    # classification_model = BeitForImageClassification.from_pretrained('kmewhort/beit-sketch-classifier')
+    classification_model = ResNetForImageClassification.from_pretrained("kmewhort/resnet34-sketch-classifier")
     print(classification_model)
     classification_model.eval()
     
     current_early_stopping = RunConfig.early_stopping
 
     exp_identifier = (
-        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_{config.number_of_prompts}_{config.early_stopping}_{category}'
+        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_{config.number_of_prompts}_{config.early_stopping}'
     )
     #### Train ####
     print(f"Start experiment {exp_identifier}")
@@ -177,7 +181,7 @@ def train(config: RunConfig):
             )  # Seed generator to create the inital latent noise
             generator.manual_seed(config.seed)
             correct = 0    
-            train_dataset = lab_meeting_deit_prompt_dataset.PromptDataset(
+            train_dataset = a_prompt_dataset_deit.PromptDataset(
                 tokenizer=tokenizer,
                 domain_placeholder_token=config.domain_placeholder_token,
                 number_of_prompts=config.number_of_prompts,
@@ -193,7 +197,12 @@ def train(config: RunConfig):
                 pin_memory=True,
             )
             train_dataloader = accelerator.prepare(train_dataloader)
-            
+            ## make Deepinversion image
+            print(1)
+            best_image = imagenet_inversion.main()
+            print(2)
+            vutils.save_image(best_image,"hyunsoo_test_test.png",normalize=True, scale_each=True, nrow=int(10))
+            print('best_image.shape :',best_image.shape)
             init_latent = return_DDIM_latent("hyunsoo_test_test.png").to(dtype=weight_dtype)
             
             for step, batch in enumerate(train_dataloader):
@@ -235,10 +244,6 @@ def train(config: RunConfig):
                     encoder_hidden_states = encoder_hidden_states.to(
                         dtype=weight_dtype
                     )
-                    ### make Deepinversion image
-                    # best_image = imagenet_inversion.main()
-                    # vutils.save_image(best_image,"hyunsoo_test_test.png",normalize=True, scale_each=True, nrow=int(10))
-                    # print('best_image.shape :',best_image.shape)
                     
 
                     # init_latent = torch.randn(
@@ -463,21 +468,22 @@ def train(config: RunConfig):
 
 
 def evaluate(config: RunConfig):
-    processor = BeitImageProcessor.from_pretrained('kmewhort/beit-sketch-classifier')
-    classification_model = BeitForImageClassification.from_pretrained('kmewhort/beit-sketch-classifier')
+    # processor = BeitImageProcessor.from_pretrained('kmewhort/beit-sketch-classifier')
+    # classification_model = BeitForImageClassification.from_pretrained('kmewhort/beit-sketch-classifier')
+    classification_model = ResNetForImageClassification.from_pretrained("microsoft/resnet-34")
     classification_model.eval()
     classification_model = classification_model.to(config.device)
     IDX2NAME = IDX2NAME_cls
     CLS2IDX = CLS2IDX_cls
 
     exp_identifier = (
-        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_{config.number_of_prompts}_{config.early_stopping}_{category}'
+        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_{config.number_of_prompts}_{config.early_stopping}'
     )
     # Stable model
     token_dir_path = f"token/"
     Path(token_dir_path).mkdir(parents=True, exist_ok=True)
-    # pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
-    pipe_path = "pipeline_token//deit model_no_prompt_sketch_2.1_345_0.08625000000000001_1_15_art"
+    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
+    # pipe_path = "pipeline_token//deit model_no_prompt_sketch_2.1_345_0.08625000000000001_1_15_art"
     # /home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/
     print("pipe_path :",pipe_path)
     pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
@@ -568,10 +574,10 @@ if __name__ == "__main__":
 
     config = pyrallis.parse(config_class=RunConfig)
     
-    category = config.model_PATH.split("_")[-2]
-    category_path = f'/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/imagenet-r_lpips_subset_{category}'
-    # label_lst = os.listdir(category_path)
-    f = open('/home/hyunsoo/inversion/DF_synthesis_LDM/deit_category_hf.txt', 'r')
+    # category = config.model_PATH.split("_")[-2]
+    # category_path = f'/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/imagenet-r_lpips_subset_{category}'
+    # # label_lst = os.listdir(category_path)
+    f = open('/home/hyunsoo/inversion/DF_synthesis_LDM/resnet_category.txt', 'r')
     label_lst = f.read().split("\n")
     print(len(label_lst))
     

@@ -26,6 +26,7 @@ LOW_RESOURCE = False
 NUM_DDIM_STEPS = 50
 GUIDANCE_SCALE = 7.5
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
 @torch.no_grad()
 def ddim_inversion(self, image):
     latent = self.image2latent(image)

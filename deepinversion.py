@@ -27,7 +27,6 @@ from inversion_utils import lr_cosine_policy, lr_policy, beta_policy, mom_cosine
 
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class DeepInversionFeatureHook():
     '''
@@ -197,7 +196,7 @@ class DeepInversionClass(object):
             targets = torch.LongTensor([random.randint(0, 999) for _ in range(self.bs)]).to('cuda')
             if not self.random_label:
                 # preselected classes, good for ResNet50v1.5
-                targets = [0]
+                targets = [i for i in range(250)]
 
                 targets = torch.LongTensor(targets * (int(self.bs / len(targets)))).to('cuda')
 
@@ -273,7 +272,7 @@ class DeepInversionClass(object):
                 net_teacher.zero_grad()
 
                 outputs = net_teacher(inputs_jit)
-                outputs = self.network_output_function(outputs)
+                outputs = self.network_output_function(outputs).logits
 
                 # R_cross classification loss
                 loss = criterion(outputs, targets)

@@ -32,7 +32,7 @@ class PromptDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        idx = random.randint(0,344)
+        idx = random.randint(0,249)
         suffix = self.label_lst[idx]
         suffix = suffix.split(",")[0]
         text = imagenet_templates_small[index % self.number_of_prompts]

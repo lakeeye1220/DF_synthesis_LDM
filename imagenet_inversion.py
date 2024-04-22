@@ -27,7 +27,7 @@ import torch.cuda.amp as amp
 import os
 import torchvision.models as models
 from inversion_utils import load_model_pytorch, distributed_is_initialized
-
+from transformers import AutoFeatureExtractor, ResNetForImageClassification
 random.seed(0)
 
 
@@ -77,10 +77,12 @@ def run(args):
 
     ### load models
     if args.arch_name=="resnet50":
-        path_to_model = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
-        net = torchvision.models.resnet50(pretrained=True)
-        net.fc = torch.nn.Linear(2048,10)
-        net.load_state_dict(torch.load(path_to_model))
+        # path_to_model = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
+        # net = torchvision.models.resnet50(pretrained=True)
+        # net.fc = torch.nn.Linear(2048,10)
+        # net.load_state_dict(torch.load(path_to_model))
+        feature_extractor = AutoFeatureExtractor.from_pretrained("kmewhort/resnet34-sketch-classifier")
+        net = ResNetForImageClassification.from_pretrained("kmewhort/resnet34-sketch-classifier")
 
     net.to(device)
     net.eval()
@@ -188,7 +190,7 @@ def main():
 
     parser.add_argument('--epochs', default=20000, type=int, help='batch size')
     parser.add_argument('--setting_id', default=0, type=int, help='settings for optimization: 0 - multi resolution, 1 - 2k iterations, 2 - 20k iterations')
-    parser.add_argument('--bs', default=1, type=int, help='batch size')
+    parser.add_argument('--bs', default=250, type=int, help='batch size')
     parser.add_argument('--jitter', default=30, type=int, help='batch size')
     parser.add_argument('--comment', default='', type=str, help='batch size')
     parser.add_argument('--arch_name', default='resnet50', type=str, help='model name from torchvision or resnet50v15')
@@ -209,7 +211,9 @@ def main():
     parser.add_argument('--l2', type=float, default=0.00001, help='l2 loss on the image')
     parser.add_argument('--main_loss_multiplier', type=float, default=1.0, help='coefficient for the main loss in optimization')
     parser.add_argument('--store_best_images', action='store_true', help='save best images as separate files')
-
+    parser.add_argument('--class_index', default=283)
+    parser.add_argument('--train', default=True)
+    parser.add_argument('--evaluate', default=False)
     args = parser.parse_args()
     print(args)
 

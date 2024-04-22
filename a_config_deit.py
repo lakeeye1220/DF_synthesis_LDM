@@ -10,7 +10,7 @@ class RunConfig:
     evaluate: bool
 
     # Id of the experiment
-    exp_id: str = "deit model_no_prompt_sketch"
+    exp_id: str = "resnet34"
 
     # Whether to use Stable Diffusion v2.1
     sd_2_1: bool = True
