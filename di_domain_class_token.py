@@ -1,0 +1,1027 @@
+import torch
+
+import os
+from pathlib import Path
+import torch.utils.checkpoint
+import itertools
+from accelerate import Accelerator
+from diffusers import StableDiffusionPipeline
+import domain_prompt_dataset as prompt_dataset
+import utils
+from inet_classes import IDX2NAME as IDX2NAME_INET
+from inet_classes import CLS2IDX
+
+from domain_config import RunConfig
+import pyrallis
+import shutil
+import matplotlib.pyplot as plt
+import numpy as np
+from deepinversion import DeepInversionClass
+
+class DeepInversionFeatureHook():
+    '''
+    Implementation of the forward hook to track feature statistics and compute a loss on them.
+    Will compute mean and variance, and will use l2 as a loss
+    '''
+
+    def __init__(self, module):
+        self.hook = module.register_forward_hook(self.hook_fn)
+        self.target = None
+
+    def hook_fn(self, module, input, output):
+
+        # hook co compute deepinversion's feature distribution regularization
+        nch = input[0].shape[1]
+        mean = input[0].mean([0, 2, 3])
+        var = input[0].permute(1, 0, 2, 3).contiguous().view([nch, -1]).var(1, unbiased=False) + 1e-8
+        r_feature = torch.log(var**(0.5) / (module.running_var.data.type(var.type()) + 1e-8)**(0.5)).mean() - 0.5 * (1.0 - (module.running_var.data.type(var.type()) + 1e-8 + (module.running_mean.data.type(var.type())-mean)**2)/var).mean()
+
+        self.r_feature = r_feature
+
+            
+    def close(self):
+        self.hook.remove()
+
+
+def gen_images(scheduler, latents,unet, vae, encoder_hidden_states, grad_update_step,do_classifier_free_guidance):
+    
+    for i, t in enumerate(scheduler.timesteps):
+        if i < grad_update_step:  # update only partial
+            with torch.no_grad():
+                latent_model_input = (
+                    torch.cat([latents] * 2)
+                    if do_classifier_free_guidance
+                    else latents
+                )
+                noise_pred = unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=encoder_hidden_states,
+                ).sample
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    (
+                        noise_pred_uncond,
+                        noise_pred_text,
+                    ) = noise_pred.chunk(2)
+                    noise_pred = (
+                        noise_pred_uncond
+                        + config.guidance_scale
+                        * (noise_pred_text - noise_pred_uncond)
+                    )
+
+                latents = scheduler.step(
+                    noise_pred, t, latents
+                ).prev_sample
+        else:
+            latent_model_input = (
+                torch.cat([latents] * 2)
+                if do_classifier_free_guidance
+                else latents
+            )
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=encoder_hidden_states,
+            ).sample
+            # perform guidance
+            if do_classifier_free_guidance:
+                (
+                    noise_pred_uncond,
+                    noise_pred_text,
+                ) = noise_pred.chunk(2)
+                noise_pred = (
+                    noise_pred_uncond
+                    + config.guidance_scale
+                    * (noise_pred_text - noise_pred_uncond)
+                )
+
+            latents = scheduler.step(
+                noise_pred, t, latents
+            ).prev_sample
+            # scale and decode the image latents with vae
+
+        latents_decode = 1 / 0.18215 * latents
+        image = vae.decode(latents_decode).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+
+        image_out = image
+    return image_out
+
+
+def train(config: RunConfig, di_img: torch.Tensor):
+    # A range of imagenet classes to run on
+
+    start_class_idx = 0#config.class_index
+    stop_class_idx = 9#config.class_index
+
+    # Classification model
+    classification_model = utils.prepare_classifier(config)
+
+    current_early_stopping = RunConfig.early_stopping
+
+    exp_identifier = (
+        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
+        f"{config.seed}_{config.number_of_prompts}_{config.early_stopping}"
+    )
+
+    if config.classifier == "inet":
+        IDX2NAME = IDX2NAME_INET
+    elif config.classifier =='imagenet_r_art':
+        IDX2NAME = {}
+        label = ['n01498041','n01534433','n02066245','n02749479','n03481172','n03498962','n03676483','n04552348']
+        for idx,i in enumerate(label):
+            value = CLS2IDX.get(i)
+            IDX2NAME[idx] = IDX2NAME_INET[value]
+        print("idx2name : ",IDX2NAME)
+
+    elif config.classifier =='imagenet_r_sketch':
+        IDX2NAME = {}
+        label = ['n01498041','n01534433','n02066245','n02091032','n02749479','n02992529','n03481172','n03498962','n03676483','n04552348']
+        for idx,i in enumerate(label):
+            value = CLS2IDX.get(i)
+            IDX2NAME[idx] = IDX2NAME_INET[value]
+        print("idx2name : ",IDX2NAME)
+    else:
+        IDX2NAME = classification_model.config.id2label
+    #print("class labels: ",IDX2NAME)
+
+    #### Train ####
+    print(f"Start experiment {exp_identifier}")
+    unet, vae, text_encoder, scheduler, tokenizer = utils.prepare_stable(config)
+    ## Freeze all parameters except for the token embeddings in text encoder
+    params_to_freeze = itertools.chain(
+        text_encoder.text_model.encoder.parameters(),
+        text_encoder.text_model.final_layer_norm.parameters(),
+        text_encoder.text_model.embeddings.position_embedding.parameters(),
+    )
+    
+    utils.freeze_params(params_to_freeze)
+    optimizer_class = torch.optim.AdamW
+    optimizer = optimizer_class(
+        text_encoder.get_input_embeddings().parameters(),  # only optimize the embeddings
+        lr=config.lr,
+        betas=config.betas,
+        weight_decay=config.weight_decay,
+        eps=config.eps,
+    )
+    print("text encoder shape :",text_encoder.get_input_embeddings().parameters())
+    criterion = torch.nn.CrossEntropyLoss().cuda()
+
+    accelerator = Accelerator(
+        gradient_accumulation_steps=config.domain_gradient_accumulation_steps,
+        mixed_precision=config.mixed_precision,
+    )
+
+    if config.gradient_checkpointing:
+        text_encoder.gradient_checkpointing_enable()
+        unet.enable_gradient_checkpointing()
+
+    text_encoder, optimizer = accelerator.prepare(
+        text_encoder, optimizer
+    )
+
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    # Move vae and unet to device
+    vae.to(accelerator.device, dtype=weight_dtype)
+    unet.to(accelerator.device, dtype=weight_dtype)
+
+    classification_model = classification_model.to(accelerator.device)
+    classification_model.eval()
+    text_encoder = text_encoder.to(accelerator.device)
+
+    
+    loss_r_feature_layers = []
+    for module in classification_model.modules():
+        if isinstance(module, torch.nn.BatchNorm2d) or isinstance(module, torch.nn.BatchNorm1d):
+            loss_r_feature_layers.append(DeepInversionFeatureHook(module))
+
+
+    utils.freeze_params(vae.parameters())
+    utils.freeze_params(unet.parameters())
+
+    # Keep vae in eval mode as we don't train it
+    vae.eval()
+    # Keep unet in train mode to enable gradient checkpointing
+    unet.train()
+
+    #with torch.inference_mode():
+
+    global_step = 0
+    total_loss = 0
+    min_loss = 99999
+
+    # Define token output dir
+    token_dir_path = f"token/{config.prefix}/train"#{class_name}"
+    Path(token_dir_path).mkdir(parents=True, exist_ok=True)
+    token_path = f"{token_dir_path}/{exp_identifier}"#_{class_name}"
+
+    img_dir_path = f"img/{config.prefix}/train"
+    if Path(img_dir_path).exists():
+        shutil.rmtree(img_dir_path)
+    Path(img_dir_path).mkdir(parents=True, exist_ok=True)
+
+
+    latents_shape = (
+        config.batch_size,
+        unet.config.in_channels,
+        config.height // 8,
+        config.width // 8,
+    )
+    num_added_tokens = tokenizer.add_tokens(config.domain_token)
+    #print("num added tokens -->",num_added_tokens)
+    if num_added_tokens == 0:
+        raise ValueError(
+            f"The tokenizer already contains the token {config.placeholder_token}. Please pass a different"
+            " `placeholder_token` that is not already in the tokenizer."
+            " 'domain_token' that is not already in the tokenizer"
+        )
+
+    ## Get token ids for our placeholder and initializer token.
+    # This code block will complain if initializer string is not a single token
+    ## Convert the initializer_token, placeholder_token to ids
+    token_ids = tokenizer.encode(config.initializer_token, add_special_tokens=False)
+    # Check if initializer_token is a single token or a sequence of tokens
+    if len(token_ids) > 1:
+        raise ValueError("The initializer token must be a single token.")
+
+    initializer_token_id = token_ids[0]
+    print("token id shape :",len(token_ids))
+    print("initizlizer token shape : ",initializer_token_id)
+    domain_token_id = tokenizer.convert_tokens_to_ids(config.domain_token)
+
+    # we resize the token embeddings here to account for placeholder_token
+    text_encoder.resize_token_embeddings(len(tokenizer))
+
+    #  Initialise the newly added placeholder token
+    token_embeds = text_encoder.get_input_embeddings().weight.data
+    token_embeds[domain_token_id] = token_embeds[initializer_token_id]
+
+    # Define dataloades
+
+    def collate_fn(examples):
+        input_ids = [example["instance_prompt_ids"] for example in examples]
+        input_ids = tokenizer.pad(
+            {"input_ids": input_ids}, padding=True, return_tensors="pt"
+        ).input_ids
+        texts = [example["instance_prompt"] for example in examples]
+        batch = {
+            "texts": texts,
+            "input_ids": input_ids,
+        }
+
+        return batch
+    
+    for epoch in range(config.num_train_epochs):
+        print(f"Epoch {epoch}")
+        correct = 0
+        if config.skip_exists and os.path.isfile(token_path):
+            print(f"Token already exist at {token_path}")
+            return
+        else:
+            for running_class_index, class_name in IDX2NAME.items():
+                if running_class_index < start_class_idx:
+                    continue
+                if running_class_index > stop_class_idx:
+                    break
+
+                classification_loss = None
+                l2_loss = None
+
+                with torch.no_grad():
+                    ref_images = torch.reshape(di_img[running_class_index],(config.batch_size,di_img[running_class_index].shape[0],di_img[running_class_index].shape[1],di_img[running_class_index].shape[2]))
+                    di_latents = vae.encode(ref_images).latent_dist.sample()
+                    di_latents = 0.18215 * di_latents
+                    print("init_latents shape : ",di_latents.shape)
+
+
+                generator = torch.Generator(
+                    device=config.device
+                )  # Seed generator to create the inital latent noise
+                generator.manual_seed(config.seed)
+                class_name = class_name.split(",")[0]
+                print(f"Start training class token for {class_name}")
+                # Stable model
+                # Extend tokenizer and add a discriminative token ###
+                prompt_suffix = " ".join(class_name.lower().split("_"))
+                train_dataset = prompt_dataset.PromptDataset(
+                    prompt_suffix=prompt_suffix,
+                    tokenizer=tokenizer,
+                    placeholder_token=None,
+                    domain_token=config.domain_token,
+                    number_of_prompts=config.number_of_prompts,
+                    #epoch_size=config.epoch_size,
+                    epoch_size = 1
+                )
+
+                train_batch_size = config.batch_size
+                train_dataloader = torch.utils.data.DataLoader(
+                    train_dataset,
+                    batch_size=train_batch_size,
+                    shuffle=True,
+                    collate_fn=collate_fn,
+                    pin_memory=True,
+                )
+
+                train_dataloader = accelerator.prepare(train_dataloader)
+            
+                for step, batch in enumerate(train_dataloader):
+                    # setting the generator here means we update the same images
+                    with accelerator.accumulate(text_encoder):
+                        # Get the text embedding for conditioning
+                        encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                        do_classifier_free_guidance = config.guidance_scale > 1.0
+                        # get unconditional embeddings for classifier free guidance
+                        if do_classifier_free_guidance:
+                            max_length = batch["input_ids"].shape[-1]
+                            uncond_input = tokenizer(
+                                [""] * config.batch_size,
+                                padding="max_length",
+                                max_length=max_length,
+                                return_tensors="pt",
+                            )
+                            uncond_embeddings = text_encoder(
+                                uncond_input.input_ids.to(config.device)
+                            )[0]
+                    
+                            encoder_hidden_states = torch.cat(
+                                [uncond_embeddings, encoder_hidden_states]
+                            )
+                        
+                        encoder_hidden_states = encoder_hidden_states.to(
+                            dtype=weight_dtype
+                        )
+                        
+                        init_latent = torch.randn(
+                            latents_shape, generator=generator, device="cuda"
+                        ).to(dtype=weight_dtype)
+
+                        latents = init_latent
+                        scheduler.set_timesteps(config.num_of_SD_inference_steps)
+                        grad_update_step = config.num_of_SD_inference_steps - 1
+
+                        # generate image
+                        for i, t in enumerate(scheduler.timesteps):
+                            if i < grad_update_step:  # update only partial
+                                with torch.no_grad():
+                                    latent_model_input = (
+                                        torch.cat([latents] * 2)
+                                        if do_classifier_free_guidance
+                                        else latents
+                                    )
+                                    noise_pred = unet(
+                                        latent_model_input,
+                                        t,
+                                        encoder_hidden_states=encoder_hidden_states,
+                                    ).sample
+
+                                    # perform guidance
+                                    if do_classifier_free_guidance:
+                                        (
+                                            noise_pred_uncond,
+                                            noise_pred_text,
+                                        ) = noise_pred.chunk(2)
+                                        noise_pred = (
+                                            noise_pred_uncond
+                                            + config.guidance_scale
+                                            * (noise_pred_text - noise_pred_uncond)
+                                        )
+
+                                    latents = scheduler.step(
+                                        noise_pred, t, latents
+                                    ).prev_sample
+                            else:
+                                latent_model_input = (
+                                    torch.cat([latents] * 2)
+                                    if do_classifier_free_guidance
+                                    else latents
+                                )
+                                noise_pred = unet(
+                                    latent_model_input,
+                                    t,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                ).sample
+                                # perform guidance
+                                if do_classifier_free_guidance:
+                                    (
+                                        noise_pred_uncond,
+                                        noise_pred_text,
+                                    ) = noise_pred.chunk(2)
+                                    noise_pred = (
+                                        noise_pred_uncond
+                                        + config.guidance_scale
+                                        * (noise_pred_text - noise_pred_uncond)
+                                    )
+
+                                latents = scheduler.step(
+                                    noise_pred, t, latents
+                                ).prev_sample
+                                # scale and decode the image latents with vae
+
+                            latents_decode = 1 / 0.18215 * latents
+                            image = vae.decode(latents_decode).sample
+                            image = (image / 2 + 0.5).clamp(0, 1)
+
+                        image_out = image
+                        image = utils.transform_img_tensor(image, config)
+                        image = torch.nn.functional.interpolate(image, size=224)
+                        if 'imagenet_r' in config.classifier:
+                            output = classification_model(image)
+                        else:
+                            output = classification_model(image).logits
+
+                        if classification_loss is None:
+                            classification_loss = criterion(
+                                output, torch.LongTensor([running_class_index]).cuda()
+                            )
+                            l2_loss = torch.nn.functional.mse_loss(di_latents,latents,reduction = 'mean').cuda()
+                            #loss_distr = sum([mod.r_feature for mod in loss_r_feature_layers])
+                        else:
+                            classification_loss += criterion(
+                                output, torch.LongTensor([running_class_index]).cuda()
+                            )
+                            l2_loss += torch.nn.functional.mse_loss(di_latents,latents,reduction = 'mean').cuda()
+                            #loss_distr += sum([mod.r_feature for mod in loss_r_feature_layers])
+                        #print("pred_class ",output)
+                        pred_class = torch.argmax(output).item()
+                        total_loss += classification_loss.detach().item() #+ loss_distr
+
+                        # log
+                        txt = f"On epoch {epoch} \n"
+                        with torch.no_grad():
+                            txt += f"{batch['texts']} \n"
+                            txt += f"Desired class: {IDX2NAME[running_class_index]}, \n"
+                            txt += f"Image class: {IDX2NAME[pred_class]}, \n"
+                            txt += f"Loss: {classification_loss.detach().item()}"
+                            txt += f"L2 Loss: {l2_loss.detach().item()}"
+                            with open("run_log.txt", "a") as f:
+                                print(txt, file=f)
+                            print(txt)
+                            utils.numpy_to_pil(
+                                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                            )[0].save(
+                                f"{img_dir_path}/{epoch}_{IDX2NAME[pred_class]}_{classification_loss.detach().item()}.jpg",
+                                "JPEG",
+                            )
+
+                        if pred_class == running_class_index:
+                            correct += 1
+
+                        torch.nn.utils.clip_grad_norm_(
+                            text_encoder.get_input_embeddings().parameters(),
+                            config.max_grad_norm,
+                        )
+
+                accelerator.backward(classification_loss+l2_loss)
+                #accelerator.backward(l2_loss)#+loss_distr)
+                # Zero out the gradients for all token embeddings except the newly added
+                # embeddings for the concept, as we only want to optimize the concept embeddings
+                if accelerator.num_processes > 1:
+                    grads = (
+                        text_encoder.module.get_input_embeddings().weight.grad
+                    )
+                else:
+                    grads = text_encoder.get_input_embeddings().weight.grad
+
+                # Get the index for tokens that we want to zero the grads for
+                index_grads_to_zero = (
+                    torch.arange(len(tokenizer)) != domain_token_id
+                )
+                grads.data[index_grads_to_zero, :] = grads.data[
+                    index_grads_to_zero, :
+                ].fill_(0)
+
+                optimizer.step()
+                optimizer.zero_grad()
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    if total_loss > 2 * min_loss:
+                        print("training collapse, try different hp")
+                        config.seed += 1
+                        print("updated seed", config.seed)
+                    print("update")
+                    if total_loss < min_loss:
+                        min_loss = total_loss
+                        current_early_stopping = config.early_stopping
+                        # Create the pipeline using the trained modules and save it.
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            print(
+                                f"Saved the new discriminative class token pipeline of {class_name} to pipeline_{token_path}"
+                            )
+                            if config.sd_2_1:
+                                pretrained_model_name_or_path = (
+                                    "stabilityai/stable-diffusion-2-1-base"
+                                )
+                            else:
+                                pretrained_model_name_or_path = (
+                                    "CompVis/stable-diffusion-v1-4"
+                                )
+                            pipeline = StableDiffusionPipeline.from_pretrained(
+                                pretrained_model_name_or_path,
+                                text_encoder=accelerator.unwrap_model(
+                                    text_encoder
+                                ),
+                                vae=vae,
+                                unet=unet,
+                                tokenizer=tokenizer,
+                            )
+                            pipeline.save_pretrained(f"pipeline_{token_path}")
+                    else:
+                        current_early_stopping -= 1
+                    print(
+                        f"{current_early_stopping} steps to stop, current best {min_loss}"
+                    )
+
+                    total_loss = 0
+                    global_step += 1
+                    print(f"Current accuracy {correct / config.epoch_size}")
+
+                if (correct / config.epoch_size > 0.7) or current_early_stopping < 0:
+                    break
+    
+
+    ################class token training ####################################################
+    optimizer_class = torch.optim.AdamW
+    optimizer_c = optimizer_class(
+        text_encoder.get_input_embeddings().parameters(),  # only optimize the embeddings
+        lr=config.lr,
+        betas=config.betas,
+        weight_decay=config.weight_decay,
+        eps=config.eps,
+    )
+    accelerator = Accelerator(
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        mixed_precision=config.mixed_precision,
+    )
+    for running_class_index, class_name in IDX2NAME.items():
+        if 'sketch' in config.classifier:
+            running_class_index = running_class_index
+        else:
+            running_class_index = running_class_index+1
+        if running_class_index < start_class_idx:
+            continue
+        if running_class_index > stop_class_idx:
+            break
+
+        class_name = class_name.split(",")[0]
+        #  Extend tokenizer and add a discriminative token ###
+        if 'imagenet_r' in config.classifier or 'sketch' in config.classifier:
+            class_infer = config.class_index
+        else:
+            class_infer = config.class_index - 1
+        prompt_suffix = " ".join(class_name.lower().split("_"))
+        num_added_tokens += tokenizer.add_tokens(config.placeholder_token)
+        #print("num added tokens -->",num_added_tokens)
+        if num_added_tokens == 1:
+            raise ValueError(
+                f"The tokenizer already contains the token {config.placeholder_token}. Please pass a different"
+                " `placeholder_token` that is not already in the tokenizer."
+                " 'domain_token' that is not already in the tokenizer"
+            )
+
+        ## Get token ids for our placeholder and initializer token.
+        # This code block will complain if initializer string is not a single token
+        ## Convert the initializer_token, placeholder_token to ids
+        token_ids = tokenizer.encode(config.initializer_token, add_special_tokens=False)
+        # Check if initializer_token is a single token or a sequence of tokens
+        if len(token_ids) > 1:
+            raise ValueError("The initializer token must be a single token.")
+
+        initializer_token_id = token_ids[0]
+        print("token id shape :",len(token_ids))
+        print("initizlizer token shape : ",initializer_token_id)
+        placeholder_token_id = tokenizer.convert_tokens_to_ids(config.placeholder_token)
+
+        # we resize the token embeddings here to account for placeholder_token
+        text_encoder.resize_token_embeddings(len(tokenizer))
+
+        #  Initialise the newly added placeholder token
+        token_embeds = text_encoder.get_input_embeddings().weight.data
+        token_embeds[placeholder_token_id] = token_embeds[initializer_token_id]
+
+        # Define dataloades
+
+        def collate_fn(examples):
+            input_ids = [example["instance_prompt_ids"] for example in examples]
+            input_ids = tokenizer.pad(
+                {"input_ids": input_ids}, padding=True, return_tensors="pt"
+            ).input_ids
+            texts = [example["instance_prompt"] for example in examples]
+            batch = {
+                "texts": texts,
+                "input_ids": input_ids,
+            }
+
+            return batch
+        
+        class_train_dataset = prompt_dataset.PromptDataset(
+                prompt_suffix=prompt_suffix,
+                tokenizer=tokenizer,
+                placeholder_token=config.placeholder_token,
+                domain_token = config.domain_token,
+                number_of_prompts=config.number_of_prompts,
+                epoch_size=config.epoch_size,
+            )
+
+        class_train_dataloader = torch.utils.data.DataLoader(
+                class_train_dataset,
+                batch_size=train_batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                pin_memory=True,
+            )
+        class_train_dataloader = accelerator.prepare(class_train_dataloader)
+
+        for epoch in range(config.num_class_train_epochs):
+            print(f"Epoch {epoch}")
+            correct = 0
+            generator = torch.Generator(
+                    device=config.device
+                    )  # Seed generator to create the inital latent noise
+            generator.manual_seed(config.seed)
+            if config.skip_exists and os.path.isfile(token_path):
+                print(f"Token already exist at {token_path}")
+                return
+            else:
+                for step, batch in enumerate(class_train_dataloader):
+                    # setting the generator here means we update the same images
+                    classification_loss = None
+                    with accelerator.accumulate(text_encoder):
+                        # Get the text embedding for conditioning
+                        encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+
+                        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+                        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+                        # corresponds to doing no classifier free guidance.
+                        do_classifier_free_guidance = config.guidance_scale > 1.0
+
+                        # get unconditional embeddings for classifier free guidance
+                        if do_classifier_free_guidance:
+                            max_length = batch["input_ids"].shape[-1]
+                            uncond_input = tokenizer(
+                                [""] * config.batch_size,
+                                padding="max_length",
+                                max_length=max_length,
+                                return_tensors="pt",
+                            )
+                            uncond_embeddings = text_encoder(
+                                uncond_input.input_ids.to(config.device)
+                            )[0]
+
+                            # For classifier free guidance, we need to do two forward passes.
+                            # Here we concatenate the unconditional and text embeddings into
+                            # a single batch to avoid doing two forward passes.
+                            encoder_hidden_states = torch.cat(
+                                [uncond_embeddings, encoder_hidden_states]
+                            )
+                        encoder_hidden_states = encoder_hidden_states.to(
+                            dtype=weight_dtype
+                        )
+                        init_latent = torch.randn(
+                            latents_shape, generator=generator, device="cuda"
+                        ).to(dtype=weight_dtype)
+
+                        latents = init_latent
+                        scheduler.set_timesteps(config.num_of_SD_inference_steps)
+                        grad_update_step = config.num_of_SD_inference_steps - 1
+
+                        # generate image
+                        for i, t in enumerate(scheduler.timesteps):
+                            if i < grad_update_step:  # update only partial
+                                with torch.no_grad():
+                                    latent_model_input = (
+                                        torch.cat([latents] * 2)
+                                        if do_classifier_free_guidance
+                                        else latents
+                                    )
+                                    noise_pred = unet(
+                                        latent_model_input,
+                                        t,
+                                        encoder_hidden_states=encoder_hidden_states,
+                                    ).sample
+
+                                    # perform guidance
+                                    if do_classifier_free_guidance:
+                                        (
+                                            noise_pred_uncond,
+                                            noise_pred_text,
+                                        ) = noise_pred.chunk(2)
+                                        noise_pred = (
+                                            noise_pred_uncond
+                                            + config.guidance_scale
+                                            * (noise_pred_text - noise_pred_uncond)
+                                        )
+
+                                    latents = scheduler.step(
+                                        noise_pred, t, latents
+                                    ).prev_sample
+                            else:
+                                latent_model_input = (
+                                    torch.cat([latents] * 2)
+                                    if do_classifier_free_guidance
+                                    else latents
+                                )
+                                noise_pred = unet(
+                                    latent_model_input,
+                                    t,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                ).sample
+                                # perform guidance
+                                if do_classifier_free_guidance:
+                                    (
+                                        noise_pred_uncond,
+                                        noise_pred_text,
+                                    ) = noise_pred.chunk(2)
+                                    noise_pred = (
+                                        noise_pred_uncond
+                                        + config.guidance_scale
+                                        * (noise_pred_text - noise_pred_uncond)
+                                    )
+
+                                latents = scheduler.step(
+                                    noise_pred, t, latents
+                                ).prev_sample
+                                # scale and decode the image latents with vae
+
+                        latents_decode = 1 / 0.18215 * latents
+                        image = vae.decode(latents_decode).sample
+                        image = (image / 2 + 0.5).clamp(0, 1)
+
+                        image_out = image
+
+                        image = utils.transform_img_tensor(image, config)
+                        image = torch.nn.functional.interpolate(image, size=224)
+                        if 'imagenet_r' in config.classifier:
+                            output = classification_model(image)
+                        else:
+                            output = classification_model(image).logits
+                        #output = classification_model(image).logits
+
+                        if classification_loss is None:
+                            print("classification loss None")
+                            classification_loss = criterion(
+                                output, torch.LongTensor([class_infer]).cuda()
+                            )
+                        else:
+                            print("classification loss not None : ")
+                            classification_loss += criterion(
+                                output, torch.LongTensor([class_infer]).cuda()
+                            )
+                        pred_class = torch.argmax(output[0][0]).item()
+                        total_loss += classification_loss.detach().item()
+
+                        # log
+                        txt = f"On epoch {epoch} \n"
+                        with torch.no_grad():
+                            txt += f"{batch['texts']} \n"
+                            txt += f"Desired class: {IDX2NAME[class_infer]}, \n"
+                            txt += f"Image class: {IDX2NAME[pred_class]}, \n"
+                            txt += f"Loss: {classification_loss.detach().item()}"
+                            with open("run_log.txt", "a") as f:
+                                print(txt, file=f)
+                            print(txt)
+                            utils.numpy_to_pil(
+                                image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                            )[0].save(
+                                f"{img_dir_path}/{epoch}_{IDX2NAME[pred_class]}_{classification_loss.detach().item()}.jpg",
+                                "JPEG",
+                            )
+
+                        if pred_class == class_infer:
+                            correct += 1
+
+                        torch.nn.utils.clip_grad_norm_(
+                            text_encoder.get_input_embeddings().parameters(),
+                            config.max_grad_norm,
+                        )
+
+                        accelerator.backward(classification_loss)
+
+                        # Zero out the gradients for all token embeddings except the newly added
+                        # embeddings for the concept, as we only want to optimize the concept embeddings
+                        if accelerator.num_processes > 1:
+                            grads = (
+                                text_encoder.module.get_input_embeddings().weight.grad
+                            )
+                        else:
+                            grads = text_encoder.get_input_embeddings().weight.grad
+
+                        # Get the index for tokens that we want to zero the grads for
+                        index_grads_to_zero = (
+                            torch.arange(len(tokenizer)) != placeholder_token_id
+                        )
+                        grads.data[index_grads_to_zero, :] = grads.data[
+                            index_grads_to_zero, :
+                        ].fill_(0)
+
+                        optimizer_c.step()
+                        optimizer_c.zero_grad()
+
+                        # Checks if the accelerator has performed an optimization step behind the scenes
+                        if accelerator.sync_gradients:
+                            if total_loss > 2 * min_loss:
+                                print("training collapse, try different hp")
+                                config.seed += 1
+                                print("updated seed", config.seed)
+                            print("update")
+                            if total_loss < min_loss:
+                                min_loss = total_loss
+                                current_early_stopping = config.early_stopping
+                                # Create the pipeline using the trained modules and save it.
+                                accelerator.wait_for_everyone()
+                                if accelerator.is_main_process:
+                                    print(
+                                        f"Saved the new discriminative class token pipeline of {class_name} to pipeline_{token_path}"
+                                    )
+                                    if config.sd_2_1:
+                                        pretrained_model_name_or_path = (
+                                            "stabilityai/stable-diffusion-2-1-base"
+                                        )
+                                    else:
+                                        pretrained_model_name_or_path = (
+                                            "CompVis/stable-diffusion-v1-4"
+                                        )
+                                    pipeline = StableDiffusionPipeline.from_pretrained(
+                                        pretrained_model_name_or_path,
+                                        text_encoder=accelerator.unwrap_model(
+                                            text_encoder
+                                        ),
+                                        vae=vae,
+                                        unet=unet,
+                                        tokenizer=tokenizer,
+                                    )
+                                    pipeline.save_pretrained(f"pipeline_{token_path}")
+                            else:
+                                current_early_stopping -= 1
+                            print(
+                                f"{current_early_stopping} steps to stop, current best {min_loss}"
+                            )
+
+                        total_loss = 0
+                        global_step += 1
+            print(f"Current accuracy {correct / config.epoch_size}")
+
+            if (correct / config.epoch_size > 0.7) or current_early_stopping < 0:
+                break
+
+def evaluate(config: RunConfig):
+    class_index = config.class_index - 1
+
+    classification_model = utils.prepare_classifier(config)
+
+    if config.classifier == "inet":
+        IDX2NAME = IDX2NAME_INET
+    else:
+        IDX2NAME = classification_model.config.id2label
+
+    class_name = IDX2NAME[class_index].split(",")[0]
+
+    exp_identifier = (
+        f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
+        f"{config.seed}_{config.number_of_prompts}_{config.early_stopping}"
+    )
+
+    # Stable model
+    token_dir_path = f"token/{class_name}"
+    Path(token_dir_path).mkdir(parents=True, exist_ok=True)
+    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}_{class_name}"
+    pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
+
+    tokens_to_try = [config.placeholder_token]
+    # Create eval dir
+    img_dir_path = f"img/{class_name}/eval"
+    if Path(img_dir_path).exists():
+        print("Img path exists {img_dir_path}")
+        if config.skip_exists:
+            print("baseline exists - skip it. Set 'skip_exists' to False regenerate.")
+        else:
+            shutil.rmtree(img_dir_path)
+            tokens_to_try.append(config.initializer_token)
+    else:
+        tokens_to_try.append(config.initializer_token)
+
+    Path(img_dir_path).mkdir(parents=True, exist_ok=True)
+    prompt_suffix = " ".join(class_name.lower().split("_"))
+
+    domain_prompts = ['photo','cartoon','painting','sketch','tattoos','origami','graffiti','patterns','toys','plastic']
+    confidence_list = []
+    for descriptive_token in tokens_to_try:
+        correct = 0
+        #prompt = f"A photo of {descriptive_token} {prompt_suffix}"
+        #print(f"Evaluation for the prompt: {prompt}")
+
+        for seed in range(config.test_size):
+            prompt = f"A {domain_prompts[seed]} of {descriptive_token} {prompt_suffix}"
+            print(f"Evaluation for the prompt: {prompt}")
+            if descriptive_token == config.initializer_token:
+                img_id = f"{img_dir_path}/{seed}_{descriptive_token}_{prompt_suffix}"
+                if os.path.exists(f"{img_id}_correct.jpg") or os.path.exists(
+                    f"{img_id}_wrong.jpg"
+                ):
+                    print(f"Image exists {img_id} - skip generation")
+                    if os.path.exists(f"{img_id}_correct.jpg"):
+                        correct += 1
+                    continue
+            generator = torch.Generator(
+                device=config.device
+            )  # Seed generator to create the inital latent noise
+            generator.manual_seed(seed)
+            image_out = pipe(prompt, output_type="pt", generator=generator)[0]
+            image = utils.transform_img_tensor(image_out, config)
+            image = torch.nn.functional.interpolate(image, size=224)
+            output = classification_model(image).logits
+            pred_probs = torch.nn.functional.softmax(output,dim=1)
+            confidence = pred_probs[:,class_index].mean().item()
+            print("confidence : ",confidence)
+            confidence_list.append(confidence)
+            pred_class = torch.argmax(output).item()
+
+            if descriptive_token == config.initializer_token:
+                img_path = (
+                    f"{img_dir_path}/{seed}_{descriptive_token}_{prompt_suffix}"
+                    f"_{'correct' if pred_class == config.class_index else 'wrong'}.jpg"
+                )
+            else:
+                img_path = (
+                    f"{img_dir_path}/{seed}_{exp_identifier}_{IDX2NAME[pred_class]}.jpg"
+                )
+
+            utils.numpy_to_pil(image_out.permute(0, 2, 3, 1).cpu().detach().numpy())[
+                0
+            ].save(img_path, "JPEG")
+
+            if pred_class == class_index:
+                correct += 1
+            print(f"Image class: {IDX2NAME[pred_class]}")
+        acc = correct / config.test_size
+        print(
+            f"-----------------------Accuracy {descriptive_token} {acc}-----------------------------"
+        )
+        plt.bar(np.arange(len(domain_prompts)),confidence_list,color='navy')
+        plt.xticks(np.arange(len(domain_prompts)),domain_prompts,rotation=45)
+        plt.title("Confidence score of different domain images")
+        plt.ylabel('Confidence score')
+        for i, value in enumerate(confidence_list):
+            plt.text(i, value + 10, str(value), ha='center', va='bottom')
+        plt.savefig(f'./A domain of {descriptive_token} {prompt_suffix} confidece score.pdf')
+
+
+if __name__ == "__main__":
+    config = pyrallis.parse(config_class=RunConfig)
+    # Check the arguments
+
+    img_dir_path = f"img/{config.prefix}/DI_img"
+    if Path(img_dir_path).exists():
+        shutil.rmtree(img_dir_path)
+    Path(img_dir_path).mkdir(parents=True, exist_ok=True)
+
+    classification_model = utils.prepare_classifier(config)
+
+    parameters = dict()
+    parameters["resolution"] = 224
+    parameters["random_label"] = False
+    parameters["start_noise"] = True
+    parameters["detach_student"] = False
+    parameters["do_flip"] = True
+
+    parameters["do_flip"] = True
+    parameters["store_best_images"] = True
+
+    coefficients = dict()
+    coefficients["r_feature"] = 0.05
+    coefficients["first_bn_multiplier"] = 10
+    coefficients["tv_l1"] = 0.0
+    coefficients["tv_l2"] = 0.0001
+    coefficients["l2"] = 0.00001
+    coefficients["lr"] = 0.2
+    coefficients["main_loss_multiplier"] = 1.0
+    coefficients["adi_scale"] = 0.0
+    network_output_function = lambda x: x
+
+    DeepInversionEngine = DeepInversionClass(net_teacher=classification_model,
+        final_data_path=img_dir_path,
+        path=img_dir_path,
+        parameters=parameters,
+        bs = 10,
+        use_fp16 = False,
+        jitter = 30,
+        criterion=torch.nn.CrossEntropyLoss(),
+        coefficients = coefficients,
+        network_output_function = network_output_function,
+        hook_for_display = None)
+    
+    net_student=None
+    di_img = DeepInversionEngine.generate_batch(net_student=net_student)
+
+    if config.train:
+        train(config,di_img)
+    if config.evaluate:
+        evaluate(config)
