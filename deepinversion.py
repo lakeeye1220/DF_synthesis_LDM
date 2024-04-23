@@ -23,6 +23,9 @@ import torchvision.utils as vutils
 from PIL import Image
 import numpy as np
 
+import pyrallis
+from a_config_deit import RunConfig
+
 from inversion_utils import lr_cosine_policy, lr_policy, beta_policy, mom_cosine_policy, clip, denormalize, create_folder
 
 import os
@@ -138,6 +141,8 @@ class DeepInversionClass(object):
         self.criterion = criterion
         self.network_output_function = network_output_function
         do_clip = True
+        config = pyrallis.parse(config_class=RunConfig)
+        inversion_root = config.init_latent_img_file
 
         if "r_feature" in coefficients:
             self.bn_reg_scale = coefficients["r_feature"]
@@ -161,7 +166,7 @@ class DeepInversionClass(object):
         local_rank = torch.cuda.current_device()
         if local_rank==0:
             create_folder(prefix)
-            create_folder(prefix + "/best_images/")
+            create_folder(prefix + f"/best_images/{inversion_root}/")
             create_folder(self.final_data_path)
             # save images to folders
             # for m in range(1000):
@@ -179,6 +184,8 @@ class DeepInversionClass(object):
             self.hook_for_display = hook_for_display
 
     def get_images(self, net_student=None, targets=None):
+        config = pyrallis.parse(config_class=RunConfig)
+        inversion_root = config.init_latent_img_file
         print("get_images call")
 
         net_teacher = self.net_teacher
@@ -199,6 +206,7 @@ class DeepInversionClass(object):
                 targets = [i for i in range(250)]
 
                 targets = torch.LongTensor(targets * (int(self.bs / len(targets)))).to('cuda')
+        
 
         img_original = self.image_resolution
 
@@ -355,10 +363,10 @@ class DeepInversionClass(object):
                     best_inputs = inputs.data.clone()
                     best_cost = loss.item()
 
-                if iteration % save_every==0 and (save_every > 0):
+                if iteration % save_every == 0 and (save_every > 0):
                     if local_rank==0:
-                        vutils.save_image(inputs,
-                                          '{}/best_images/output_{:05d}_gpu_{}.png'.format(self.prefix,
+                        vutils.save_image(denormalize(inputs.detach()),
+                                          '{}/best_images/{}/output_{:05d}_gpu_{}.png'.format(self.prefix,inversion_root,
                                                                                            iteration // save_every,
                                                                                            local_rank),
                                           normalize=True, scale_each=True, nrow=int(10))

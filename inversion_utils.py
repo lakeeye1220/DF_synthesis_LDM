@@ -126,11 +126,11 @@ def denormalize(image_tensor, use_fp16=False):
     convert floats back to input
     '''
     if use_fp16:
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float16)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float16)
+        mean = np.array([0.5, 0.5, 0.5], dtype=np.float16)
+        std = np.array([0.5, 0.5, 0.5], dtype=np.float16)
     else:
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.5, 0.5, 0.5])
+        std = np.array([0.5, 0.5, 0.5])
 
     for c in range(3):
         m, s = mean[c], std[c]

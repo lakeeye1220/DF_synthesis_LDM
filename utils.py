@@ -52,7 +52,7 @@ def transform_img_tensor(image, config):
 def prepare_classifier(config):
     if config.classifier == "inet":
         from transformers import ViTForImageClassification
-
+        
         model = ViTForImageClassification.from_pretrained(
             "google/vit-large-patch16-224"
         ).to(config.device)
@@ -67,6 +67,13 @@ def prepare_classifier(config):
 
         model = CustomViTForImageClassification.from_pretrained(
             "vesteinn/vit-mae-inat21"
+        ).to(config.device)
+        
+    elif config.classifier == "imagenet_sketch":
+        from transformers import ResNetForImageClassification
+
+        model = ResNetForImageClassification.from_pretrained(
+            "kmewhort/resnet34-sketch-classifier"
         ).to(config.device)
 
     return model
@@ -104,3 +111,25 @@ def save_progress(text_encoder, placeholder_token_id, accelerator, config, save_
     )
     learned_embeds_dict = {config.placeholder_token: learned_embeds.detach().cpu()}
     torch.save(learned_embeds_dict, save_path)
+
+def prepare_idx2name(config, classification_model):
+    if config.classifier == "inet":
+            IDX2NAME = IDX2NAME_INET
+    elif config.classifier =='imagenet_r_art':
+        IDX2NAME = {}
+        label = ['n01498041','n01534433','n02066245','n02749479','n03481172','n03498962','n03676483','n04552348']
+        for idx,i in enumerate(label):
+            value = CLS2IDX.get(i)
+            IDX2NAME[idx] = IDX2NAME_INET[value]
+        print("idx2name : ",IDX2NAME)
+
+    elif config.classifier =='imagenet_r_sketch':
+        IDX2NAME = {}
+        label = ['n01498041','n01534433','n02066245','n02091032','n02749479','n02992529','n03481172','n03498962','n03676483','n04552348']
+        for idx,i in enumerate(label):
+            value = CLS2IDX.get(i)
+            IDX2NAME[idx] = IDX2NAME_INET[value]
+        print("idx2name : ",IDX2NAME)
+    else:
+        IDX2NAME = classification_model.config.id2label
+    return IDX2NAME    

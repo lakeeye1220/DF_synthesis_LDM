@@ -6,3 +6,6 @@ pipeline_token
 wandb
 classifier
 generations
+*.pyc
+*.pt
+*.png
