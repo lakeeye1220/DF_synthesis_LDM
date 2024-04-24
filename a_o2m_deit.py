@@ -315,6 +315,8 @@ def train(config: RunConfig):
 
                         image = utils.transform_img_tensor(image, config) # (1, 3, 224, 224)
                         image = torch.nn.functional.interpolate(image, size=224) # (1, 3, 224, 224)
+                        print('image :',image)
+                        print('image.shape :',image.shape)
                         # output = classification_model(image).logits # [1, 1000]
                         with autocast():
                             output = classification_model.forward(image)
@@ -445,7 +447,7 @@ def train(config: RunConfig):
 def evaluate(config: RunConfig):
     # processor = BeitImageProcessor.from_pretrained('kmewhort/beit-sketch-classifier')
     # classification_model = BeitForImageClassification.from_pretrained('kmewhort/beit-sketch-classifier')
-    classification_model = ResNetForImageClassification.from_pretrained("kmewhort/beit-sketch-classifier")
+    classification_model = utils.prepare_classifier(config)
     classification_model.eval()
     classification_model = classification_model.to(config.device)
 
@@ -457,7 +459,11 @@ def evaluate(config: RunConfig):
     token_dir_path = f"token/"
     Path(token_dir_path).mkdir(parents=True, exist_ok=True)
     
-    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
+    # pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_at_home_1"
+    pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_white_1"
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_1"
+    
     print("pipe_path :",pipe_path)
     pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
 
