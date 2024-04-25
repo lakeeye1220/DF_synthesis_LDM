@@ -17,12 +17,12 @@ class RunConfig:
 
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
     #classifier: str = "inet"
-    classifier: str = "imagenet_r_art"
-    prefix: str="imagenet_r"
+    classifier: str = "resnet34_sketch"
+    prefix: str="sd2.1_admtkof_mse_di_img_resnet34_sketch"
 
     # Affect training time
     early_stopping: int = 15
-    num_train_epochs: int = 1 #50
+    num_train_epochs: int = 10 #50
     num_class_train_epochs: int = 50
 
     # affect variability of the training images
@@ -31,13 +31,14 @@ class RunConfig:
     number_of_prompts: int = 1  #3 how many different prompts to use
     batch_size: int = 1  # set to one due to gpu constraints
     gradient_accumulation_steps: int = 20  # same as the epoch size
-    domain_gradient_accumulation_steps: int = 1000
+    domain_gradient_accumulation_steps: int = 20
 
     # Skip if there exists a token checkpoint
     skip_exists: bool = False
 
     # Train and Optimization
     lr: float = 0.00025 * epoch_size
+    #lr: float = 0.025 * epoch_size
     betas: tuple = field(default_factory=lambda: (0.9, 0.999))
     weight_decay: float = 1e-2
     eps: float = 1e-08
@@ -51,7 +52,7 @@ class RunConfig:
     num_of_SD_inference_steps: int = 30
 
     # Discrimnative tokens
-    placeholder_token: str = "newclas"
+    placeholder_token: str = "dmtk" #"newclas"
     initializer_token: str = "a"
     domain_token: str = "dmtk"
 
