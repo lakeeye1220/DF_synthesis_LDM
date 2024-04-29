@@ -235,24 +235,29 @@ def train(config: RunConfig,ref_img:torch.Tensor):
         with torch.no_grad():
             #di_img = di_img[0].to(accelerator.device)
             di_input_ids = tokenizer(
-            f"A{prompt_suffix}",
+            f"A sketch of {prompt_suffix}",
             padding="do_not_pad",
             truncation=True,
             max_length=tokenizer.model_max_length,
             return_tensors="pt",
             ).input_ids
             di_img = ref_img[running_class_index-1].reshape(config.batch_size,ref_img[running_class_index-1].shape[0],ref_img[running_class_index-1].shape[1],ref_img[running_class_index-1].shape[2])
+            di_img = (di_img / 2 + 0.5).clamp(0, 1)
+            utils.numpy_to_pil(
+            di_img.detach().permute(0, 2, 3, 1).cpu().detach().numpy()
+            )[0].save(f"{img_dir_path}/di_img.jpg",
+            "JPEG",)
             #print("di_inputs_ids shape :",di_input_ids.shape,"di image shape : ",di_img.shape)
             di_encoder_hidden_states = encode_tokens(tokenizer, text_encoder, di_input_ids.to(accelerator.device))
             di_latents = vae.encode(di_img).latent_dist.sample() * 0.18215
 
         # Sample noise that we'll add to the latents 
         noise = torch.randn_like(di_latents, device=di_latents.device)
-        bsz = di_latents.shape[0]
 
         # Sample a random last step for each image
         scheduler.set_timesteps(config.num_of_SD_inference_steps)
         noisy_latents = scheduler.add_noise(di_latents, noise, torch.tensor([999],dtype=torch.int64, device=di_latents.device))
+        #noisy_latents = scheduler.add_noise(di_latents, noise, scheduler.timesteps[-1])
         #print(scheduler.timesteps)
         do_classifier_free_guidance = config.guidance_scale > 1.0
 
@@ -313,7 +318,7 @@ def train(config: RunConfig,ref_img:torch.Tensor):
         image_out = image
         utils.numpy_to_pil(
             image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
-            )[0].save(f"{img_dir_path}/discover.jpg",
+            )[0].save(f"{img_dir_path}/A sketch of {prompt_suffix}.jpg",
             "JPEG",
         )
 
@@ -444,12 +449,12 @@ def train(config: RunConfig,ref_img:torch.Tensor):
                             classification_loss = criterion(
                                 output, torch.LongTensor([class_infer]).cuda()
                             )
-                            mse_loss = 10.0*mse_criterion(latents,di_latents).cuda()
+                            mse_loss = mse_criterion(latents,di_latents).cuda()
                         else:
                             classification_loss += criterion(
                                 output, torch.LongTensor([class_infer]).cuda()
                             )
-                            mse_loss += 10.0*mse_criterion(latents,di_latents).cuda()
+                            mse_loss += mse_criterion(latents,di_latents).cuda()
 
                         pred_class = torch.argmax(output).item()
                         total_loss += (classification_loss.detach().item()+mse_loss.detach().item())

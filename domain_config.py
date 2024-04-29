@@ -18,7 +18,7 @@ class RunConfig:
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
     #classifier: str = "inet"
     classifier: str = "resnet34_sketch"
-    prefix: str="sd2.1_admtkof_mse_di_img_resnet34_sketch"
+    prefix: str="sktech_clip_sd2.1_aphotoofdmtk_mse_di_img_resnet34_sketch"
 
     # Affect training time
     early_stopping: int = 15
