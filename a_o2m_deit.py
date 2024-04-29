@@ -170,13 +170,9 @@ def train(config: RunConfig):
             print(f"Token already exist at {token_path}")
             return
         else:
-            print(1)
-            best_image = imagenet_inversion.main()
-            print(2)
-            print('best_image.shape :',best_image.shape)
-            print('best_image.shape[0] :',best_image[0].shape)
-            print('best_image.shape[240] :',best_image[240].shape)
-            # print('best_image.shape :',best_image.shape) # (250, 3, 224, 224)
+            # best_image = imagenet_inversion.main()
+            # torch.save(best_image, 'best_image.pt')
+            best_image = torch.load('best_image.pt', weights_only=True)
             for running_class_index, class_name in IDX2NAME.items():
                 print(f"Current step's running_class_index is {running_class_index}")
                 print(f"Current step's class_name is {class_name}")
@@ -186,10 +182,10 @@ def train(config: RunConfig):
                 generator.manual_seed(config.seed)
                 
                 ## make Deepinversion image
-                vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}_all.png",normalize=True, scale_each=True, nrow=int(10))
                 vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
-                condition_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
-                
+                init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('init_latent :',init_latent)
                 class_name = class_name.split(",")[0]
                 print(f"Start training class token for {class_name}")
                 
@@ -214,7 +210,7 @@ def train(config: RunConfig):
                 )
                 train_dataloader = accelerator.prepare(train_dataloader)
 
-                examples_image = [] 
+                examples_image = []
                 for step, batch in enumerate(train_dataloader):
                     if step // 200 == 0:
                         print('step :', step)
@@ -255,58 +251,88 @@ def train(config: RunConfig):
                         )
                         
 
-                        init_latent = torch.randn(
-                            latents_shape, generator=generator, device=config.device
-                        ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
+                        # init_latent = torch.randn(
+                        #     latents_shape, generator=generator, device=config.device
+                        # ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
 
                         latents = init_latent
-                        scheduler.set_timesteps(config.num_of_SD_inference_steps)
-                        grad_update_step = config.num_of_SD_inference_steps - 1 # 29
-                        examples_latent = []
+                        scheduler.set_timesteps(config.num_of_SD_inference_steps - 1)
+                        grad_update_step = [x-1 for x in config.grad_update_lst]
+                        print('grad_update_step :',grad_update_step)
+                        example_latent_init = wandb.Image(latents, caption=f"'{running_class_index}' class latent_init")
+                        examples_latent = [example_latent_init]
                         # generate image
                         for i, t in enumerate(scheduler.timesteps):
-                            latent_model_input = (
-                                torch.cat([condition_latent]*2)
-                                if do_classifier_free_guidance
-                                else latents
-                            ) # (2, 4, 64, 64)
-                            latent_model_input = (
-                                torch.cat((latents,condition_latent))
-                                if do_classifier_free_guidance
-                                else latents
-                            ) # (2, 4, 64, 64)
-                            noise_pred = unet(
-                                latent_model_input,
-                                t,
-                                encoder_hidden_states=encoder_hidden_states,
-                            ).sample # (2, 4, 64, 64)
-                            print('noise_pred :',noise_pred)
-                            print('noise_pred.shape :',noise_pred.shape)
-                            # perform guidance
-                            if do_classifier_free_guidance:
-                                (
-                                    noise_pred_uncond,
-                                    noise_pred_text,
-                                ) = noise_pred.chunk(2)
-                                noise_pred = (
-                                    noise_pred_uncond
-                                    + config.guidance_scale
-                                    * (noise_pred_text - noise_pred_uncond)
-                                ) # (1, 4, 64, 64)
+                            if i in grad_update_step:
+                                print(i, 'grad yes')
+                                latent_model_input = (
+                                    torch.cat([latents]*2)
+                                    if do_classifier_free_guidance
+                                    else latents
+                                ) # (2, 4, 64, 64)
 
-                            latents = scheduler.step(
-                                noise_pred, t, latents
-                            ).prev_sample # (1, 4, 64, 64)
-                            print('latents :',latents)
-                            if step == 1 and running_class_index == 1:
-                                latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
-                                image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
-                                image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
-                                example_latent = wandb.Image(utils.numpy_to_pil(
-                                    image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
-                                    )[0], caption=f"latent_{i}")
-                                examples_latent.append(example_latent)
-                                        
+                                noise_pred = unet(
+                                    latent_model_input,
+                                    t,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                ).sample # (2, 4, 64, 64)
+
+                                # perform guidance
+                                if do_classifier_free_guidance:
+                                    (
+                                        noise_pred_uncond,
+                                        noise_pred_text,
+                                    ) = noise_pred.chunk(2)
+                                    noise_pred = (
+                                        noise_pred_uncond
+                                        + config.guidance_scale
+                                        * (noise_pred_text - noise_pred_uncond)
+                                    ) # (1, 4, 64, 64)
+
+                                latents = scheduler.step(
+                                    noise_pred, t, latents
+                                ).prev_sample # (1, 4, 64, 64)
+                            else:
+                                with torch.no_grad():
+                                    print(i, 'grad no')
+                                    latent_model_input = (
+                                            torch.cat([latents]*2)
+                                            if do_classifier_free_guidance
+                                            else latents
+                                        ) # (2, 4, 64, 64)
+                                    
+                                    noise_pred = unet(
+                                        latent_model_input,
+                                        t,
+                                        encoder_hidden_states=encoder_hidden_states,
+                                    ).sample # (2, 4, 64, 64)
+
+                                    # perform guidance
+                                    if do_classifier_free_guidance:
+                                        (
+                                            noise_pred_uncond,
+                                            noise_pred_text,
+                                        ) = noise_pred.chunk(2)
+                                        noise_pred = (
+                                            noise_pred_uncond
+                                            + config.guidance_scale
+                                            * (noise_pred_text - noise_pred_uncond)
+                                        ) # (1, 4, 64, 64)
+
+                                    latents = scheduler.step(
+                                        noise_pred, t, latents
+                                    ).prev_sample # (1, 4, 64, 64)
+
+                            latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
+                            image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
+                            image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
+                            example_latent = wandb.Image(utils.numpy_to_pil(
+                                image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
+                                )[0], caption=f"'{running_class_index}' class latent_{i}")
+                            examples_latent.append(example_latent)
+                        if running_class_index % 10 == 0:
+                            wandb.log({"examples_latent" : examples_latent})
+                        
                         latents_decode = 1 / 0.18215 * latents # (1, 4, 64, 64)
                         image = vae.decode(latents_decode).sample # (1, 3, 512, 512)
                         image = (image / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
@@ -315,14 +341,11 @@ def train(config: RunConfig):
 
                         image = utils.transform_img_tensor(image, config) # (1, 3, 224, 224)
                         image = torch.nn.functional.interpolate(image, size=224) # (1, 3, 224, 224)
-                        print('image :',image)
-                        print('image.shape :',image.shape)
                         # output = classification_model(image).logits # [1, 1000]
                         with autocast():
                             output = classification_model.forward(image)
 
                         output = output.logits
-                        print('output :',output)
                         pred_probs = torch.nn.functional.softmax(output,dim=1)
                         confidence = pred_probs[:,running_class_index].mean().item()
                         # print('pred_probs :',pred_probs)
@@ -459,10 +482,16 @@ def evaluate(config: RunConfig):
     token_dir_path = f"token/"
     Path(token_dir_path).mkdir(parents=True, exist_ok=True)
     
-    # pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
-    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_at_home_1"
-    pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_white_1"
-    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_1"
+    pipe_path = f"pipeline_{token_dir_path}/{exp_identifier}"
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_at_home_1" 
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_white_1" # 213_2
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_1" # 213_3
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_1" # 217_2
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_1" # 213_2
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_not_only_last_update_white_1" # 213_2
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_fix_DI_345"
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_1" # 213_3
+    # pipe_path = "/home/hyunsoo/inversion/DF_synthesis_LDM/pipeline_token/resnet34_all_update_up_lr_denormalize_4_at_home_1" # 217_2
     
     print("pipe_path :",pipe_path)
     pipe = StableDiffusionPipeline.from_pretrained(pipe_path).to(config.device)
@@ -480,8 +509,10 @@ def evaluate(config: RunConfig):
     Path(img_dir_path).mkdir(parents=True, exist_ok=True)
 
     eval_img_list = []
-    idx_lst = [0,1,2,3,4,5,6,7,8,9]
-    best_image = imagenet_inversion.main()
+    idx_lst = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    best_image_eval = imagenet_inversion.main()
+    torch.save(best_image_eval, 'best_image_eval.pt')
+    best_image = torch.load('best_image_eval.pt', weights_only=True)
     for descriptive_token in tokens_to_try:
         confidence_list = []
         correct = 0
@@ -491,7 +522,7 @@ def evaluate(config: RunConfig):
         for seed in range(config.test_size):
             idx = idx_lst[seed]
             print('seed')
-            vutils.save_image(denormalize(best_image[idx]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
+            vutils.save_image(denormalize(best_image[idx]),f"for_labmeeting_{config.init_latent_img_file}_{idx}.png",normalize=True, scale_each=True, nrow=int(10))
             latents = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
             prompt_suffix = label_lst[idx].split(",")[0]
             promptls = [f"A {descriptive_token} of {prompt_suffix}"]

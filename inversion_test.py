@@ -19,6 +19,8 @@ import shutil
 from torch.optim.adam import Adam
 from PIL import Image
 import os
+import torchvision.transforms as transforms
+
 # best_image = imagenet_inversion.main()
 # vutils.save_image(best_image,"hyunsoo_test_test.png",normalize=True, scale_each=True, nrow=int(10))
 # print('best_image.shape :',best_image.shape)

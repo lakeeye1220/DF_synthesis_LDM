@@ -3,7 +3,8 @@ import random
 from inet_classes import IDX2NAME as IDX2NAME_cls
 from inet_classes import CLS2IDX as CLS2IDX_cls
 
-imagenet_templates_small = ["A {} of {}"]
+imagenet_templates_small = ["A photo of {} from {}"]
+# imagenet_templates_small = ["A {} of {}"]
 class PromptDataset(Dataset):
     """
     A dataset to prepare the instance and class images with the promots for fine-tuning the model.
@@ -35,7 +36,7 @@ class PromptDataset(Dataset):
         # suffix = self.label_lst[idx]
         # suffix = suffix.split(",")[0]
         text = imagenet_templates_small[index % self.number_of_prompts]
-        text = text.format(self.domain_token, self.prompt_suffix)
+        text = text.format(self.prompt_suffix, self.domain_token)
         example["instance_prompt"] = text
         example["instance_prompt_ids"] = self.tokenizer(
             text,
