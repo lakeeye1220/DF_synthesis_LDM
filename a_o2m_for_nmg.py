@@ -7,58 +7,29 @@ from  torch.cuda.amp import autocast
 import itertools
 from accelerate import Accelerator
 from diffusers import StableDiffusionPipeline
-import a_nmg_o2m
+import a_prompt_dataset_deit
 import utils
 # from resnet_classes import IDX2NAME as IDX2NAME_cls
 # from resnet_classes import CLS2IDX as CLS2IDX_cls
 import torchvision
 import torchvision.utils as vutils
-
+from pipeline_stable_diffusion_nmg import NMGPipeline
 from transformers import BeitImageProcessor, BeitForImageClassification, ResNetForImageClassification
 from PIL import Image
 import requests
-
-import a_nmg_prompt_dataset as prompt_dataset
-from a_nmg_config import RunConfig
+from diffusers.schedulers import DDIMScheduler
+from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
+from a_config_deit import RunConfig
 import pyrallis
 import shutil
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from inversion_test import return_DDIM_latent, load_512
+from inversion_test import return_DDIM_latent
 import wandb
 import imagenet_inversion
 from inversion_utils import denormalize
-from deepinversion import DeepInversionClass
-import torch.nn.functional as F
 
-def encode_tokens(tokenizer, text_encoder, input_ids):
-    z = []
-    if input_ids.shape[1] > 77:  
-        # todo: Handle end-of-sentence truncation
-        while max(map(len, input_ids)) != 0:
-            rem_tokens = [x[75:] for x in input_ids]
-            tokens = []
-            for j in range(len(input_ids)):
-                tokens.append(input_ids[j][:75] if len(input_ids[j]) > 0 else [tokenizer.eos_token_id] * 75)
-
-            rebuild = [[tokenizer.bos_token_id] + list(x[:75]) + [tokenizer.eos_token_id] for x in tokens]
-            if hasattr(torch, "asarray"):
-                z.append(torch.asarray(rebuild))
-            else:
-                z.append(torch.IntTensor(rebuild))
-            input_ids = rem_tokens
-    else:
-        z.append(input_ids)
-
-    # Get the text embedding for conditioning
-    encoder_hidden_states = None
-    for tokens in z:
-        state = text_encoder(tokens.to(text_encoder.device), output_hidden_states=True)
-        state = text_encoder.text_model.final_layer_norm(state['hidden_states'][-1])
-        encoder_hidden_states = state if encoder_hidden_states is None else torch.cat((encoder_hidden_states, state), axis=-2)
-        
-    return encoder_hidden_states
 
 def train(config: RunConfig):
     # Classification model
@@ -192,9 +163,6 @@ def train(config: RunConfig):
         config.height // 8,
         config.width // 8,
     ) # (1, 4, 64, 64)
-    
-    #print(scheduler.timesteps)
-    do_classifier_free_guidance = config.guidance_scale > 1.0
 
     for epoch in range(config.num_train_epochs):
         print(f"Epoch {epoch}")
@@ -205,41 +173,8 @@ def train(config: RunConfig):
         else:
             # best_image = imagenet_inversion.main()
             # torch.save(best_image, 'best_image.pt')
-            
+            best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/best_image.pt', weights_only=True)
             for running_class_index, class_name in IDX2NAME.items():
-                
-                best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/best_image.pt', weights_only=True)
-                with torch.no_grad():
-                    #di_img = di_img[0].to(accelerator.device)
-                    di_input_ids = tokenizer(
-                    f"An {class_name}",
-                    padding="do_not_pad",
-                    truncation=True,
-                    max_length=tokenizer.model_max_length,
-                    return_tensors="pt",
-                    ).input_ids
-                    di_img = best_image[running_class_index-1].reshape(config.batch_size,best_image[running_class_index-1].shape[0],best_image[running_class_index-1].shape[1],best_image[running_class_index-1].shape[2]).half()
-                    #print("di_inputs_ids shape :",di_input_ids.shape,"di image shape : ",di_img.shape)
-                    print('di_input_ids :',di_input_ids)
-                    di_encoder_hidden_states = encode_tokens(tokenizer, text_encoder, di_input_ids.to(accelerator.device))
-                    print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-                    print('di_img.shape :',di_img.shape)
-                    # todo : 512 * 512로 바꾸기
-                    di_img = F.interpolate(di_img, size=512)
-                    print('di_img.shape :',di_img.shape)
-                    print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-                    di_latents = vae.encode(di_img).latent_dist.sample() * 0.18215
-                
-                print('di_latents.shape :',di_latents.shape)
-                print('class_name :',class_name)
-                # Sample noise that we'll add to the latents 
-                noise = torch.randn_like(di_latents, device=di_latents.device)
-                bsz = di_latents.shape[0]
-
-                # Sample a random last step for each image
-                scheduler.set_timesteps(config.num_of_SD_inference_steps)
-                noisy_latents = scheduler.add_noise(di_latents, noise, torch.tensor([999],dtype=torch.int64, device=di_latents.device))
-
                 print(f"Current step's running_class_index is {running_class_index}")
                 print(f"Current step's class_name is {class_name}")
                 generator = torch.Generator(
@@ -247,76 +182,16 @@ def train(config: RunConfig):
                 )  # Seed generator to create the inital latent noise
                 generator.manual_seed(config.seed)
                 
-                do_classifier_free_guidance = config.guidance_scale > 1.0
-
-                if do_classifier_free_guidance:
-                    max_length = di_input_ids.shape[-1]
-                    uncond_input = tokenizer(
-                        [""] * config.batch_size,
-                        padding="max_length",
-                        max_length=max_length,
-                        return_tensors="pt",
-                    )
-                    uncond_embeddings = text_encoder(
-                        uncond_input.input_ids.to(config.device)
-                    )[0]
-                    
-                    di_encoder_hidden_states = torch.cat(
-                        [uncond_embeddings, di_encoder_hidden_states]
-                    )
-                di_encoder_hidden_states = di_encoder_hidden_states.to(
-                                    dtype=weight_dtype)
-                # Predict the noise residual
-                latents = noisy_latents
-                for i, t in enumerate(scheduler.timesteps):
-                    with torch.no_grad():
-                        latent_model_input = (
-                            torch.cat([latents] * 2)
-                            if do_classifier_free_guidance
-                            else latents
-                        )
-                        #print("latent_model_input shape : ",latent_model_input.shape) # 2 4 64 64
-                        #print("t shape : ",t.shape) # []
-                        #print("encoder hidden statse shape : ",di_encoder_hidden_states.shape) #2,4,1024
-                        noise_pred = unet(
-                            latent_model_input,
-                            t,
-                            encoder_hidden_states=di_encoder_hidden_states,
-                        ).sample
-
-                        # perform guidance
-                        if do_classifier_free_guidance:
-                            (
-                                noise_pred_uncond,
-                                noise_pred_text,
-                            ) = noise_pred.chunk(2)
-                            noise_pred = (
-                                noise_pred_uncond
-                                + config.guidance_scale
-                                * (noise_pred_text - noise_pred_uncond)
-                            )
-
-                        latents = scheduler.step(
-                            noise_pred, t, latents
-                        ).prev_sample
-
-                    latents_decode = 1 / 0.18215 * latents
-                    image = vae.decode(latents_decode).sample
-                    image = (image / 2 + 0.5).clamp(0, 1)
-                image_out = image
-                utils.numpy_to_pil(
-                    image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
-                    )[0].save(f"{img_dir_path}/discover_{running_class_index}.jpg",
-                    "JPEG",
-                )
                 ## make Deepinversion image
-                # vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
-                # init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
+                vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
+                init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('init_latent :',init_latent)
                 class_name = class_name.split(",")[0]
                 print(f"Start training class token for {class_name}")
                 
                 prompt_suffix = " ".join(class_name.lower().split("_"))
-                train_dataset = prompt_dataset.PromptDataset(
+                train_dataset = a_prompt_dataset_deit.PromptDataset(
                     prompt_suffix=prompt_suffix,
                     tokenizer=tokenizer,
                     domain_token=config.domain_token,
@@ -380,10 +255,63 @@ def train(config: RunConfig):
                         # init_latent = torch.randn(
                         #     latents_shape, generator=generator, device=config.device
                         # ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
+                        model_ckpt = "CompVis/stable-diffusion-v1-4"
+                        pipe = NMGPipeline.from_pretrained(model_ckpt, torch_dtype=torch.float16)
+                        img = f"{config.init_latent_img_file}.png"
+                        img = Image.open(img)
+                        # set scheduler and invere scheduler
+                        pipe.scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+                        pipe.inverse_scheduler = DDIMInverseScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_zero=False)
+                        pipe = pipe.to('cuda')
+                        # inversion
+                        # todo : text encoder를 같은걸 넣고 dmtk를 학습시키는 방향으로 -> trg_prompt는 어떤 것으로 구성할 것인가?
+                        src_prompt = f"a domain of {class_name}"
+                        trg_prompt = f"a sitting on a table next to a vase of flowers"
+                        prompts = [src_prompt, trg_prompt]
+                        NUM_DIFFUSION_STEPS = 50
+                        inv_output = pipe.invert(src_prompt, img, num_inference_steps=NUM_DIFFUSION_STEPS)
+                        forward_latents = inv_output.latents_list
+                        print('forward_latents : ',len(forward_latents))
 
-                        # latents = init_latent
-                        latents = noisy_latents # (1, 4, 28, 28)
+                        # set prompt-to-prompt paremeters
+                        cross_replace_steps = 0.8
+                        self_replace_steps = 0.7
+                        src_text = "cat"
+                        trg_text = "tiger"
+                        blend_word = (((src_text,), (trg_text,)))
+                        eq_params = {"words": (trg_text,), "values": (2,)}
+                        controller = make_controller(prompts, # ['a cat sitting on a table next to a vase of flowers', 'a tiger sitting on a table next to a vase of flowers']
+                                                    True,
+                                                    cross_replace_steps, # 0.8
+                                                    self_replace_steps, # 0.7
+                                                    blend_word, # (('cat',), ('tiger',))
+                                                    eq_params, # {'words': ('tiger',), 'values': (2,)}
+                                                    NUM_DIFFUSION_STEPS, # 50
+                                                    pipe.tokenizer, # CLIPToekenizer
+                                                    pipe.device)
 
+                        # set NMG parameters
+                        grad_scale = 5000 # gradient scale
+                        guidance_noise_map = 10 # NMG scale
+                        guidance_text = 10 # CFG scale
+                        noise_cond_loss_type = 'l1' # choices=['l1', 'l2', 'smooth_l1']
+
+                        # NMG with prompt-to-prompt
+                        with torch.autocast("cuda"): 
+                            outputs = pipe(
+                                prompt=prompts,
+                                controller=controller,
+                                num_inference_steps=NUM_DIFFUSION_STEPS,
+                                grad_scale=grad_scale, # 5000
+                                guidance_noise_map=guidance_noise_map, # 10
+                                guidance_text=guidance_text, # 10
+                                noise_cond_loss_type=noise_cond_loss_type, # l1
+                                forward_latents=forward_latents # length : 51 (noisemap list)
+                            )
+
+
+                        ########################
+                        latents = init_latent
                         scheduler.set_timesteps(config.num_of_SD_inference_steps - 1)
                         grad_update_step = [x-1 for x in config.grad_update_lst]
                         print('grad_update_step :',grad_update_step)
@@ -711,10 +639,11 @@ if __name__ == "__main__":
     config = pyrallis.parse(config_class=RunConfig)
     wandb.init(project=f"{config.init_project_name}",entity=f"{config.init_entity_name}")
     custom_root = f"{config.custom_root}"
-
+    
     category_path = config.category_path
     f = open(f"{category_path}", 'r')
     label_lst = f.read().split("\n")
+    
     # Check the arguments
     if config.train:
         train(config)

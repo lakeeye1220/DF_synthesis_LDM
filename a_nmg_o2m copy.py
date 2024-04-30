@@ -12,7 +12,7 @@ import utils
 # from resnet_classes import IDX2NAME as IDX2NAME_cls
 # from resnet_classes import CLS2IDX as CLS2IDX_cls
 import torchvision
-import torchvision.utils as vutils
+import torchvision.utils as vutilsimg
 
 from transformers import BeitImageProcessor, BeitForImageClassification, ResNetForImageClassification
 from PIL import Image
@@ -25,11 +25,12 @@ import shutil
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-from inversion_test import return_DDIM_latent
+from inversion_test import return_DDIM_latent, load_512
 import wandb
 import imagenet_inversion
 from inversion_utils import denormalize
 from deepinversion import DeepInversionClass
+import torch.nn.functional as F
 
 def encode_tokens(tokenizer, text_encoder, input_ids):
     z = []
@@ -59,7 +60,7 @@ def encode_tokens(tokenizer, text_encoder, input_ids):
         
     return encoder_hidden_states
 
-def train(config: RunConfig, ref_img: torch.Tensor):
+def train(config: RunConfig):
     # Classification model
     classification_model = utils.prepare_classifier(config)
     classification_model.eval()
@@ -191,28 +192,6 @@ def train(config: RunConfig, ref_img: torch.Tensor):
         config.height // 8,
         config.width // 8,
     ) # (1, 4, 64, 64)
-
-    with torch.no_grad():
-        #di_img = di_img[0].to(accelerator.device)
-        di_input_ids = tokenizer(
-        f"A{prompt_suffix}",
-        padding="do_not_pad",
-        truncation=True,
-        max_length=tokenizer.model_max_length,
-        return_tensors="pt",
-        ).input_ids
-        di_img = ref_img[running_class_index-1].reshape(config.batch_size,ref_img[running_class_index-1].shape[0],ref_img[running_class_index-1].shape[1],ref_img[running_class_index-1].shape[2])
-        #print("di_inputs_ids shape :",di_input_ids.shape,"di image shape : ",di_img.shape)
-        di_encoder_hidden_states = encode_tokens(tokenizer, text_encoder, di_input_ids.to(accelerator.device))
-        di_latents = vae.encode(di_img).latent_dist.sample() * 0.18215
-
-    # Sample noise that we'll add to the latents 
-    noise = torch.randn_like(di_latents, device=di_latents.device)
-    bsz = di_latents.shape[0]
-
-    # Sample a random last step for each image
-    scheduler.set_timesteps(config.num_of_SD_inference_steps)
-    noisy_latents = scheduler.add_noise(di_latents, noise, torch.tensor([999],dtype=torch.int64, device=di_latents.device))
     
     #print(scheduler.timesteps)
     do_classifier_free_guidance = config.guidance_scale > 1.0
@@ -226,8 +205,41 @@ def train(config: RunConfig, ref_img: torch.Tensor):
         else:
             # best_image = imagenet_inversion.main()
             # torch.save(best_image, 'best_image.pt')
-            best_image = torch.load('best_image.pt', weights_only=True)
+            
             for running_class_index, class_name in IDX2NAME.items():
+                
+                best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/best_image.pt', weights_only=True)
+                with torch.no_grad():
+                    #di_img = di_img[0].to(accelerator.device)
+                    di_input_ids = tokenizer(
+                    f"An {class_name}",
+                    padding="do_not_pad",
+                    truncation=True,
+                    max_length=tokenizer.model_max_length,
+                    return_tensors="pt",
+                    ).input_ids
+                    di_img = best_image[running_class_index-1].reshape(config.batch_size,best_image[running_class_index-1].shape[0],best_image[running_class_index-1].shape[1],best_image[running_class_index-1].shape[2]).half()
+                    #print("di_inputs_ids shape :",di_input_ids.shape,"di image shape : ",di_img.shape)
+                    print('di_input_ids :',di_input_ids)
+                    di_encoder_hidden_states = encode_tokens(tokenizer, text_encoder, di_input_ids.to(accelerator.device))
+                    print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                    print('di_img.shape :',di_img.shape)
+                    # todo : 512 * 512로 바꾸기
+                    di_img = F.interpolate(di_img, size=512)
+                    print('di_img.shape :',di_img.shape)
+                    print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                    di_latents = vae.encode(di_img).latent_dist.sample() * 0.18215
+                
+                print('di_latents.shape :',di_latents.shape)
+                print('class_name :',class_name)
+                # Sample noise that we'll add to the latents 
+                noise = torch.randn_like(di_latents, device=di_latents.device)
+                bsz = di_latents.shape[0]
+
+                # Sample a random last step for each image
+                scheduler.set_timesteps(config.num_of_SD_inference_steps)
+                noisy_latents = scheduler.add_noise(di_latents, noise, torch.tensor([999],dtype=torch.int64, device=di_latents.device))
+
                 print(f"Current step's running_class_index is {running_class_index}")
                 print(f"Current step's class_name is {class_name}")
                 generator = torch.Generator(
@@ -235,9 +247,71 @@ def train(config: RunConfig, ref_img: torch.Tensor):
                 )  # Seed generator to create the inital latent noise
                 generator.manual_seed(config.seed)
                 
+                do_classifier_free_guidance = config.guidance_scale > 1.0
+
+                if do_classifier_free_guidance:
+                    max_length = di_input_ids.shape[-1]
+                    uncond_input = tokenizer(
+                        [""] * config.batch_size,
+                        padding="max_length",
+                        max_length=max_length,
+                        return_tensors="pt",
+                    )
+                    uncond_embeddings = text_encoder(
+                        uncond_input.input_ids.to(config.device)
+                    )[0]
+                    
+                    di_encoder_hidden_states = torch.cat(
+                        [uncond_embeddings, di_encoder_hidden_states]
+                    )
+                di_encoder_hidden_states = di_encoder_hidden_states.to(
+                                    dtype=weight_dtype)
+                # Predict the noise residual
+                latents = noisy_latents
+                for i, t in enumerate(scheduler.timesteps):
+                    with torch.no_grad():
+                        latent_model_input = (
+                            torch.cat([latents] * 2)
+                            if do_classifier_free_guidance
+                            else latents
+                        )
+                        #print("latent_model_input shape : ",latent_model_input.shape) # 2 4 64 64
+                        #print("t shape : ",t.shape) # []
+                        #print("encoder hidden statse shape : ",di_encoder_hidden_states.shape) #2,4,1024
+                        noise_pred = unet(
+                            latent_model_input,
+                            t,
+                            encoder_hidden_states=di_encoder_hidden_states,
+                        ).sample
+
+                        # perform guidance
+                        if do_classifier_free_guidance:
+                            (
+                                noise_pred_uncond,
+                                noise_pred_text,
+                            ) = noise_pred.chunk(2)
+                            noise_pred = (
+                                noise_pred_uncond
+                                + config.guidance_scale
+                                * (noise_pred_text - noise_pred_uncond)
+                            )
+
+                        latents = scheduler.step(
+                            noise_pred, t, latents
+                        ).prev_sample
+
+                    latents_decode = 1 / 0.18215 * latents
+                    image = vae.decode(latents_decode).sample
+                    image = (image / 2 + 0.5).clamp(0, 1)
+                image_out = image
+                utils.numpy_to_pil(
+                    image_out.permute(0, 2, 3, 1).cpu().detach().numpy()
+                    )[0].save(f"{img_dir_path}/discover_{running_class_index}.jpg",
+                    "JPEG",
+                )
                 ## make Deepinversion image
-                vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
-                init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
+                # vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
+                # init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
                 class_name = class_name.split(",")[0]
                 print(f"Start training class token for {class_name}")
                 
@@ -308,7 +382,7 @@ def train(config: RunConfig, ref_img: torch.Tensor):
                         # ).to(dtype=weight_dtype) # (1, 4, 64, 64) : same with latents_shape
 
                         # latents = init_latent
-                        latents = noisy_latents
+                        latents = noisy_latents # (1, 4, 28, 28)
 
                         scheduler.set_timesteps(config.num_of_SD_inference_steps - 1)
                         grad_update_step = [x-1 for x in config.grad_update_lst]
@@ -637,55 +711,12 @@ if __name__ == "__main__":
     config = pyrallis.parse(config_class=RunConfig)
     wandb.init(project=f"{config.init_project_name}",entity=f"{config.init_entity_name}")
     custom_root = f"{config.custom_root}"
-    classification_model = utils.prepare_classifier(config)
-
-    img_dir_path = f"img/{config.classifier}/DI_img"
-    if Path(img_dir_path).exists():
-        shutil.rmtree(img_dir_path)
-    Path(img_dir_path).mkdir(parents=True, exist_ok=True) 
 
     category_path = config.category_path
     f = open(f"{category_path}", 'r')
     label_lst = f.read().split("\n")
-    
-    parameters = dict()
-    parameters["resolution"] = 512
-    parameters["random_label"] = False
-    parameters["start_noise"] = True
-    parameters["detach_student"] = False
-    parameters["do_flip"] = True
-
-    parameters["do_flip"] = True
-    parameters["store_best_images"] = True
-
-    coefficients = dict()
-    coefficients["r_feature"] = 0.05
-    coefficients["first_bn_multiplier"] = 10
-    coefficients["tv_l1"] = 0.0
-    coefficients["tv_l2"] = 0.0001
-    coefficients["l2"] = 0.00001
-    coefficients["lr"] = 0.2
-    coefficients["main_loss_multiplier"] = 1.0
-    coefficients["adi_scale"] = 0.0
-    network_output_function = lambda x: x
-    
-    DeepInversionEngine = DeepInversionClass(net_teacher=classification_model,
-        final_data_path=img_dir_path,
-        path=img_dir_path,
-        parameters=parameters,
-        bs = 250,
-        use_fp16 = False,
-        jitter = 30,
-        criterion=torch.nn.CrossEntropyLoss(),
-        coefficients = coefficients,
-        network_output_function = network_output_function,
-        hook_for_display = None)
-    
-    net_student=None
-    di_img = DeepInversionEngine.generate_batch(net_student=net_student)
-
     # Check the arguments
     if config.train:
-        train(config, di_img)
+        train(config)
     if config.evaluate:
         evaluate(config)

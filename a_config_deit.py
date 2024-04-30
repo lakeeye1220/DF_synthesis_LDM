@@ -11,7 +11,7 @@ class RunConfig:
     # Id of the experiment
     exp_description: str = "217_1_test"
     init_latent_img_file: str = "217_1_test"
-    custom_root: str = "after_refactoring"
+    custom_root: str = "0430"
     
     # Exp setup
     class_index: int = 283
@@ -19,7 +19,7 @@ class RunConfig:
     evaluate: bool = True
 
     # Whether to use Stable Diffusion v2.1
-    sd_2_1: bool = True
+    sd_2_1: bool = False
 
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
     classifier: str = "imagenet_sketch"
