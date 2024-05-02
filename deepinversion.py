@@ -290,8 +290,11 @@ class DeepInversionClass(object):
 
                 # R_feature loss
                 rescale = [self.first_bn_multiplier] + [1. for _ in range(len(self.loss_r_feature_layers)-1)]
+                print('@@@@@@@@@@@@')
+                # print('self.loss_r_feature_layers :', self.loss_r_feature_layers)
+                # print('len(self.loss_r_feature_layers) :', len(self.loss_r_feature_layers))
                 loss_r_feature = sum([mod.r_feature * rescale[idx] for (idx, mod) in enumerate(self.loss_r_feature_layers)])
-
+                print('loss_r_feature :',loss_r_feature)
                 # R_ADI
                 loss_verifier_cig = torch.zeros(1)
                 if self.adi_scale!=0.0:

@@ -4,27 +4,35 @@ from pathlib import Path
 
 @dataclass
 class RunConfig:
-    # Exp setup
-    class_index: int
-    train: bool
-    evaluate: bool
-
+    # WandB setup
+    init_project_name: str = "o2m_0425"
+    init_entity_name: str = "gustn9609"
+    
     # Id of the experiment
-    exp_id: str = "demo"
+    exp_description: str = "216_2_test20"
+    init_latent_img_file: str = "216_2_test20"
+    custom_root: str = "after_refactoring"
+    
+    # Exp setup
+    class_index: int = 283
+    train: bool = True
+    evaluate: bool = True
 
     # Whether to use Stable Diffusion v2.1
     sd_2_1: bool = True
 
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
-    classifier: str = "inet"
-
+    classifier: str = "imagenet_sketch"
+    # model_PATH: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
+    model_PATH: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_art_0.9436619718309859.pt"
+    category_path: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/resnet_category.txt"
     # Affect training time
-    early_stopping: int = 20
-    num_train_epochs: int = 100
+    early_stopping: int = 15
+    num_train_epochs: int = 1
 
     # affect variability of the training images
     # i.e., also sets batch size with accumulation
-    epoch_size: int = 1000
+    trainloader_size: int = 1 # 345
     number_of_prompts: int = 1  #3 how many different prompts to use
     batch_size: int = 1  # set to one due to gpu constraints
     gradient_accumulation_steps: int = 20  # same as the epoch size
@@ -33,24 +41,23 @@ class RunConfig:
     skip_exists: bool = False
 
     # Train and Optimization
-    lr: float = 0.00025 * epoch_size
+    lr: float = 0.0025 * trainloader_size
     betas: tuple = field(default_factory=lambda: (0.9, 0.999))
     weight_decay: float = 1e-2
     eps: float = 1e-08
     max_grad_norm: str = "1"
     seed: int = 35
-
+    class_num: int = 10
     # Generative model
-    guidance_scale: int = 7
+    guidance_scale: int = 6
     height: int = 512
     width: int = 512
     num_of_SD_inference_steps: int = 30
+    grad_update_lst: list = field(default_factory=lambda: [x for x in range(1,31)])
 
     # Discrimnative tokens
-    domain_placeholder_token: str = "mdtk"
-    class_placeholder_token: str = "clstk"
-    domain_initializer_token: str = "domain"
-    class_initializer_token: str = "class"
+    domain_token: str = "dmtk"
+    domain_initializer_token: str = "photo"
 
     # Path to save all outputs to
     output_path: Path = Path("results")

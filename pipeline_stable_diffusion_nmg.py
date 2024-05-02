@@ -270,7 +270,7 @@ class NMGPipeline(DiffusionPipeline):
         image = self.vae.decode(latents).sample
         image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        image = image.cpu().permute(0, 2, 3, 1).float().detach().numpy()
         return image
 
     def prepare_image_latents(self, image, batch_size, dtype, device, generator=None):
@@ -397,7 +397,7 @@ class NMGPipeline(DiffusionPipeline):
             )
         return image, has_nsfw_concept
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def invert(
         self,
         prompt: Optional[str] = None,
@@ -411,7 +411,7 @@ class NMGPipeline(DiffusionPipeline):
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
-        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None
     ):
         controller = EmptyControl()
 
@@ -507,7 +507,7 @@ class NMGPipeline(DiffusionPipeline):
 
         return NMGPipelineInvertOutput(latents_list=latents_list, images=image)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]],
