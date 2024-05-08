@@ -18,7 +18,7 @@ class RunConfig:
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
     #classifier: str = "inet"
     classifier: str = "resnet34_sketch"
-    prefix: str="sktech_clip_sd2.1_aphotoofdmtk_mse_di_img_resnet34_sketch"
+    prefix: str="BN_sd2.1_admtk_mse_di_img_resnet34_sketch"
 
     # Affect training time
     early_stopping: int = 15
@@ -50,6 +50,7 @@ class RunConfig:
     height: int = 512
     width: int = 512
     num_of_SD_inference_steps: int = 30
+    strength = 0.9
 
     # Discrimnative tokens
     placeholder_token: str = "dmtk" #"newclas"
