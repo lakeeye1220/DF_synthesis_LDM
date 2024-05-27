@@ -5,12 +5,12 @@ from pathlib import Path
 @dataclass
 class RunConfig:
     # WandB setup
-    init_project_name: str = "o2m_0425"
+    init_project_name: str = "213_multi"
     init_entity_name: str = "gustn9609"
     
     # Id of the experiment
-    exp_description: str = "216_2_test20"
-    init_latent_img_file: str = "216_2_test20"
+    exp_description: str = "213_all_1_scale"
+    init_latent_img_file: str = "213_all_1_scale"
     custom_root: str = "after_refactoring"
     
     # Exp setup
@@ -28,7 +28,7 @@ class RunConfig:
     category_path: str = "/home/hyunsoo/inversion/DF_synthesis_LDM/resnet_category.txt"
     # Affect training time
     early_stopping: int = 15
-    num_train_epochs: int = 1
+    num_train_epochs: int = 3
 
     # affect variability of the training images
     # i.e., also sets batch size with accumulation
@@ -54,6 +54,7 @@ class RunConfig:
     width: int = 512
     num_of_SD_inference_steps: int = 30
     grad_update_lst: list = field(default_factory=lambda: [x for x in range(1,31)])
+    # grad_update_lst: list = field(default_factory=lambda: [30])
 
     # Discrimnative tokens
     domain_token: str = "dmtk"
@@ -69,7 +70,7 @@ class RunConfig:
     gradient_checkpointing = True
 
     # evaluate
-    test_size: int = 20
+    test_size: int = 10
 
 
 def __post_init__(self):

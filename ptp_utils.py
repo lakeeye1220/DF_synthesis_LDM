@@ -18,7 +18,8 @@ from PIL import Image, ImageDraw, ImageFont
 # import cv2
 from typing import Optional, Union, Tuple, List, Callable, Dict
 from IPython.display import display
-from tqdm.notebook import tqdm
+# from tqdm.notebook import tqdm
+import tqdm
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):

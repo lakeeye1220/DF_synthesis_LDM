@@ -7,7 +7,8 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 from typing import Optional, Union, Tuple, List, Callable, Dict
 import torch
 from typing import Optional, Union, Tuple, List, Callable, Dict
-from tqdm.notebook import tqdm
+# from tqdm.notebook import tqdm
+import tqdm
 import torch
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 import torch.nn.functional as nnf

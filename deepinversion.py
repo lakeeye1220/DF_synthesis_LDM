@@ -24,7 +24,7 @@ from PIL import Image
 import numpy as np
 
 import pyrallis
-from a_config_deit import RunConfig
+from config import RunConfig
 
 from inversion_utils import lr_cosine_policy, lr_policy, beta_policy, mom_cosine_policy, clip, denormalize, create_folder
 
@@ -40,18 +40,39 @@ class DeepInversionFeatureHook():
         self.hook = module.register_forward_hook(self.hook_fn)
 
     def hook_fn(self, module, input, output):
+        # print('###################################')
+        # print('input',input)
+        # print('input[0].shape :',input[0].shape)
         # hook co compute deepinversion's feature distribution regularization
         nch = input[0].shape[1]
         mean = input[0].mean([0, 2, 3])
         var = input[0].permute(1, 0, 2, 3).contiguous().view([nch, -1]).var(1, unbiased=False)
-
+        # print('input[0].shape :',input[0].shape)
+        # print('input[0].mean([0, 2, 3]).shape :',input[0].mean([0, 2, 3]).shape)
+        # print('module.running_mean.data.shape :',module.running_mean.data.shape)
         #forcing mean and variance to match between two distributions
         #other ways might work better, i.g. KL divergence
         r_feature = torch.norm(module.running_var.data - var, 2) + torch.norm(
             module.running_mean.data - mean, 2)
-
+        # print('sum(module.running_mean.data) :',module.running_mean.data.shape)
+        # print('sum(module.running_var.data) :',module.running_var.data.shape)
         self.r_feature = r_feature
         # must have no output
+
+    def close(self):
+        self.hook.remove()
+
+class DeepInversionFeatureHook_for_mean_and_var():
+    '''
+    Implementation of the forward hook to track feature statistics and compute a loss on them.
+    Will compute mean and variance, and will use l2 as a loss
+    '''
+    def __init__(self, module):
+        self.hook = module.register_forward_hook(self.hook_fn)
+
+    def hook_fn(self, module, input, output):
+        mean_and_var = (module.running_mean.data, module.running_var.data)
+        self.mean_and_var = mean_and_var
 
     def close(self):
         self.hook.remove()
@@ -174,10 +195,15 @@ class DeepInversionClass(object):
 
         ## Create hooks for feature statistics
         self.loss_r_feature_layers = []
-
+        self.mean_and_var = []
+        # print('self.net_teacher :',self.net_teacher)
         for module in self.net_teacher.modules():
             if isinstance(module, nn.BatchNorm2d):
+                # print('module :',module)
                 self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
+                # self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
+                print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
+                # print('self.mean_and_var :',len(self.mean_and_var))
 
         self.hook_for_display = None
         if hook_for_display is not None:
@@ -213,6 +239,7 @@ class DeepInversionClass(object):
         data_type = torch.half if use_fp16 else torch.float
         inputs = torch.randn((self.bs, 3, img_original, img_original), requires_grad=True, device='cuda',
                              dtype=data_type)
+        # print('inputs.shape :',inputs.shape)
         pooling_function = nn.modules.pooling.AvgPool2d(kernel_size=2)
 
         if self.setting_id==0:
@@ -290,11 +317,15 @@ class DeepInversionClass(object):
 
                 # R_feature loss
                 rescale = [self.first_bn_multiplier] + [1. for _ in range(len(self.loss_r_feature_layers)-1)]
-                print('@@@@@@@@@@@@')
+                # print('@@@@@@@@@@@@')
                 # print('self.loss_r_feature_layers :', self.loss_r_feature_layers)
                 # print('len(self.loss_r_feature_layers) :', len(self.loss_r_feature_layers))
                 loss_r_feature = sum([mod.r_feature * rescale[idx] for (idx, mod) in enumerate(self.loss_r_feature_layers)])
-                print('loss_r_feature :',loss_r_feature)
+                # mean_lst = [(mod.mean_and_var[0]).mean() for (idx, mod) in enumerate(self.mean_and_var)]
+                # var_lst = [(mod.mean_and_var[1]).mean() for (idx, mod) in enumerate(self.mean_and_var)]
+                # total_mean = sum(mean_lst) / 36
+                # total_var = sum(var_lst) / 36
+                # print('loss_r_feature :',loss_r_feature)
                 # R_ADI
                 loss_verifier_cig = torch.zeros(1)
                 if self.adi_scale!=0.0:
@@ -381,6 +412,7 @@ class DeepInversionClass(object):
         # to reduce memory consumption by states of the optimizer we deallocate memory
         optimizer.state = collections.defaultdict(dict)
 
+        # return best_inputs, total_mean, total_var
         return best_inputs
 
     def save_images(self, images, targets):
@@ -417,10 +449,12 @@ class DeepInversionClass(object):
             if use_fp16:
                 targets = targets.half()
 
+        # best_image, total_mean, total_var = self.get_images(net_student=net_student, targets=targets)
         best_image = self.get_images(net_student=net_student, targets=targets)
 
         net_teacher.eval()
 
         self.num_generations += 1
 
+        # return best_image, total_mean, total_var
         return best_image

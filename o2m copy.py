@@ -164,12 +164,10 @@ def train(config: RunConfig, accelerator):
         config.width // 8,
     ) # (1, 4, 64, 64)
     loss_r_feature_layers = []
-    loss_r_feature_layers_mean_and_var = []
     for module in classification_model.modules():
         if isinstance(module, nn.BatchNorm2d):
             # print('module :',module)
             loss_r_feature_layers.append(DeepInversionFeatureHook(module))
-            loss_r_feature_layers_mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
 
     for epoch in range(config.num_train_epochs):
         print(f"Epoch {epoch}")
@@ -224,7 +222,6 @@ def train(config: RunConfig, accelerator):
 
                 examples_image = []
                 resize = torchvision.transforms.Resize((224,224))
-                rescale = []
                 for step, batch in enumerate(train_dataloader):
                     if step // 200 == 0:
                         print('step :', step)
@@ -284,17 +281,13 @@ def train(config: RunConfig, accelerator):
                         grad_update_step = [i for i in range(30)]
                         for i, t in enumerate(scheduler.timesteps):
                             if i in grad_update_step:
-                                # # print(i, 'grad yes')
-                                # if i == 1:
-                                #     snapshot1 = tracemalloc.take_snapshot()
-                                # if i == 4:
-                                #     snapshot2 = tracemalloc.take_snapshot()
-                                    
-                                #     top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+                                print(i, 'grad yes')
+                                snapshot = tracemalloc.take_snapshot()
+                                top_stats = snapshot.statistics('lineno')
 
-                                #     print("[ Top 10 ]")
-                                #     for stat in top_stats[:10]:
-                                #         print(stat)
+                                print("[ Top 10 ]")
+                                for stat in top_stats[:10]:
+                                    print(stat)
                                 latent_model_input = (
                                     torch.cat([latents]*2)
                                     if do_classifier_free_guidance
@@ -322,38 +315,23 @@ def train(config: RunConfig, accelerator):
                                 latents = scheduler.step(
                                     noise_pred, t, latents
                                 ).prev_sample # (1, 4, 64, 64)
-
-                                with torch.no_grad():
-                                    latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
-                                    # image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
-                                    image_for_log = vae.decode(latents_decode_for_log.to(torch.float16)).sample # (1, 3, 512, 512)
-                                    image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
-                                    image_for_log = resize(image_for_log)
-                                    example_latent = wandb.Image(utils.numpy_to_pil(
-                                        image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
-                                        )[0], caption=f"'{label_lst[running_class_index]}' class {i} step image")
-                                    examples_latent.append(example_latent)
-                                    output = classification_model.forward(image_fog_log.to(torch.float))
-                                    # rescale = [1.] + [1. for _ in range(len(loss_r_feature_layers)-1)]
-                                    # rescale = [1.] + [1. for _ in range(len(loss_r_feature_layers)-1)]
-                                    if rescale == []:
-                                        rescale = []
-                                        total_sum = [sum(mod.mean_and_var[0]) for (idx, mod) in enumerate(loss_r_feature_layers_mean_and_var)]
-                                        total = sum(total_sum)
-                                        print('total_sum :',len(total_sum))
-                                        for (idx, mod) in enumerate(loss_r_feature_layers_mean_and_var):
-                                            rescale.append(mod.mean_and_var[0] / total)
-                                            # print('loss_r_feature_layers_mean_and_var :', [[mod.mean_and_var[0]] for (idx, mod) in enumerate(loss_r_feature_layers_mean_and_var)])
-                                            # print('rescale :',rescale)
-                                        print(len(rescale))
-                                    loss_r_feature += sum([mod.r_feature * rescale[idx] for (idx, mod) in enumerate(loss_r_feature_layers)])
-                                    # R_prior losses
-                                    loss_l1, loss_l2 = get_image_prior_losses(image_fog_log)
-                                    loss_var_l1 += loss_l1
-                                    loss_var_l2 += loss_l2
-
-                                    del output
-                                    # print("loss_r_feature_layers :",len(loss_r_feature_layers))
+                                latents_decode_for_log = 1 / 0.18215 * latents # (1, 4, 64, 64)
+                                # image_for_log = vae.decode(latents_decode_for_log).sample # (1, 3, 512, 512)
+                                image_for_log = vae.decode(latents_decode_for_log.to(torch.float16)).sample # (1, 3, 512, 512)
+                                image_fog_log = (image_for_log / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
+                                image_for_log = resize(image_for_log)
+                                example_latent = wandb.Image(utils.numpy_to_pil(
+                                    image_fog_log.permute(0, 2, 3, 1).cpu().detach().numpy()
+                                    )[0], caption=f"'{label_lst[running_class_index]}' class {i} step image")
+                                examples_latent.append(example_latent)
+                                output = classification_model.forward(image_fog_log.to(torch.float))
+                                rescale = [1.] + [1. for _ in range(len(loss_r_feature_layers)-1)]
+                                # print('rescale :',rescale)
+                                loss_r_feature += sum([mod.r_feature * rescale[idx] for (idx, mod) in enumerate(loss_r_feature_layers)])
+                                # R_prior losses
+                                loss_l1, loss_l2 = get_image_prior_losses(image_fog_log)
+                                loss_var_l1 += loss_l1
+                                loss_var_l2 += loss_l2
                             else:
                                 with torch.no_grad():
                                     print(i, 'grad no')
@@ -387,7 +365,7 @@ def train(config: RunConfig, accelerator):
 
 
                         latents_decode = 1 / 0.18215 * latents # (1, 4, 64, 64)
-                        image = vae.decode(latents_decode.to(torch.float16)).sample # (1, 3, 512, 512)
+                        image = vae.decode(latents_decode).sample # (1, 3, 512, 512)
                         image = (image / 2 + 0.5).clamp(0, 1)# (1, 3, 512, 512)
                         example_latent = wandb.Image(utils.numpy_to_pil(
                             image.permute(0, 2, 3, 1).cpu().detach().numpy()
@@ -458,7 +436,7 @@ def train(config: RunConfig, accelerator):
                             config.max_grad_norm,
                         )
 
-                        accelerator.backward(classification_loss + 0.1 * loss_r_feature + 0.001 * loss_var_l1)
+                        accelerator.backward(classification_loss + 1 * loss_r_feature + 0.01 * loss_var_l1)
 
                         # Zero out the gradients for all token embeddings except the newly added
                         # embeddings for the concept, as we only want to optimize the concept embeddings
@@ -637,21 +615,7 @@ def evaluate(config: RunConfig, accelerator):
         print(
             f"-----------------------Accuracy {descriptive_token} {acc}-----------------------------"
         )
-class DeepInversionFeatureHook_for_mean_and_var():
-    '''
-    Implementation of the forward hook to track feature statistics and compute a loss on them.
-    Will compute mean and variance, and will use l2 as a loss
-    '''
-    def __init__(self, module):
-        self.hook = module.register_forward_hook(self.hook_fn)
 
-    def hook_fn(self, module, input, output):
-        mean_and_var = (module.running_mean.data, module.running_var.data)
-        self.mean_and_var = mean_and_var
-
-    def close(self):
-        self.hook.remove()
-        
 class DeepInversionFeatureHook():
     '''
     Implementation of the forward hook to track feature statistics and compute a loss on them.

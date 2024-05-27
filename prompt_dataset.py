@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 import random
-from inet_classes import IDX2NAME as IDX2NAME_cls
-from inet_classes import CLS2IDX as CLS2IDX_cls
+# from inet_classes import IDX2NAME as IDX2NAME_cls
+# from inet_classes import CLS2IDX as CLS2IDX_cls
 
 # imagenet_templates_small = ["A photo of {} from {}"]
 imagenet_templates_small = ["A {} of {}"]
