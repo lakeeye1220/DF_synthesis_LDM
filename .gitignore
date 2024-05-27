@@ -1,6 +1,5 @@
 __pycache__
 *.jpg
-*.txt
 *.pdf
 pipeline_token
 wandb
@@ -11,3 +10,6 @@ generations
 *.png
 *.pt
 diffusers
+run_log.txt
+deit_category_hf.txt
+resnet_category.txt
