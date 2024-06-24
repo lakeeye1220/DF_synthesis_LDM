@@ -16,7 +16,11 @@ class RunConfig:
     sd_2_1: bool = True
 
     # the classifier (Options: inet (ImageNet), inat (iNaturalist), cub (CUB200))
-    classifier: str = "inet"
+    #classifier: str = "inet_resnet34"
+    #classifier: str = "inet"
+    classifier:str = "resnet34_cartoon_pacs"
+    prefix:str="cartoon_guided_latent"
+    init_latent_img_file: str = "cartoon_guided_latent"
 
     # Affect training time
     early_stopping: int = 15
@@ -34,6 +38,7 @@ class RunConfig:
 
     # Train and Optimization
     lr: float = 0.00025 * epoch_size
+    #lr: float = 0.001
     betas: tuple = field(default_factory=lambda: (0.9, 0.999))
     weight_decay: float = 1e-2
     eps: float = 1e-08
@@ -56,7 +61,8 @@ class RunConfig:
 
     # Cuda related
     device: str = "cuda"
-    mixed_precision = "fp16"
+    #mixed_precision = "fp16"
+    mixed_precision = "no"
     gradient_checkpointing = True
 
     # evaluate
