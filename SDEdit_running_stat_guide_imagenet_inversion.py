@@ -56,7 +56,7 @@ def validate_one(input, target, model):
     print("Verifier accuracy: ", prec1.item())
 
 
-def run(args, step):
+def run(args, init_image, step):
     torch.manual_seed(args.local_rank)
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
 
@@ -115,7 +115,7 @@ def run(args, step):
                 if isinstance(module, nn.BatchNorm2d):
                     module.eval().half()
 
-    from deepinversion import DeepInversionClass
+    from SDEdit_running_stat_guide_deepinversion import DeepInversionClass
 
     exp_name = args.exp_name
     # final images will be stored here:
@@ -163,6 +163,7 @@ def run(args, step):
         hook_for_display = None
 
     DeepInversionEngine = DeepInversionClass(net_teacher=net,
+                                             init_image=init_image,
                                              final_data_path=adi_data_path,
                                              path=exp_name,
                                              parameters=parameters,
@@ -182,7 +183,7 @@ def run(args, step):
 
     return best_image
 
-def main(step):
+def main(init_image, step):
     parser = argparse.ArgumentParser()
     parser.add_argument('-s', '--worldsize', type=int, default=1, help='Number of processes participating in the job.')
     parser.add_argument('--local_rank', '--rank', type=int, default=0, help='Rank of the current process.')
@@ -207,8 +208,9 @@ def main(step):
     parser.add_argument('--r_feature', type=float, default=0.01, help='coefficient for feature distribution regularization')
     parser.add_argument('--first_bn_multiplier', type=float, default=10., help='additional multiplier on first bn layer of R_feature')
     parser.add_argument('--tv_l1', type=float, default=0.0, help='coefficient for total variation L1 loss')
-    parser.add_argument('--tv_l2', type=float, default=0.0001, help='coefficient for total variation L2 loss')
-    parser.add_argument('--lr', type=float, default=0.25, help='learning rate for optimization')
+    # parser.add_argument('--tv_l2', type=float, default=0.0001, help='coefficient for total variation L2 loss')
+    parser.add_argument('--tv_l2', type=float, default=0.0000001, help='coefficient for total variation L2 loss')
+    parser.add_argument('--lr', type=float, default=0.000025, help='learning rate for optimization')
     parser.add_argument('--l2', type=float, default=0.00001, help='l2 loss on the image')
     parser.add_argument('--main_loss_multiplier', type=float, default=1.0, help='coefficient for the main loss in optimization')
     parser.add_argument('--store_best_images', action='store_true', help='save best images as separate files')
@@ -219,7 +221,7 @@ def main(step):
     print(args)
     step = step
     torch.backends.cudnn.benchmark = True
-    best_image = run(args, step)
+    best_image = run(args, init_image, step)
     return best_image
 
 

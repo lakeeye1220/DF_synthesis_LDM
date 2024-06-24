@@ -39,7 +39,7 @@ import numpy as np
 from inversion_utils import denormalize
 import torchvision.utils as vutils
 from inversion_test import return_DDIM_latent
-import latent_StableDiffusionImg2ImgPipeline_running_stat_guide as StableDiffusionImg2ImgPipeline
+import latent_StableDiffusionImg2ImgPipeline_running_stat_guide_YJ as StableDiffusionImg2ImgPipeline
 import imagenet_inversion
 from torchvision.transforms import ToTensor
 import csv
@@ -69,25 +69,25 @@ confidence_list = []
 step_lst = [200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000]
 for step in step_lst:
     best_image = imagenet_inversion.main(step)
-    torch.save(best_image, 'diplustsd.pt')
-    best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/diplustsd.pt', weights_only=True)
+    torch.save(best_image, 'diplustsd2.pt')
+    best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/diplustsd2.pt', weights_only=True)
     for i in range(1):
         pipe = StableDiffusionImg2ImgPipeline.StableDiffusionImg2ImgPipeline.from_pretrained(model_id_or_path, torch_dtype=torch.float32)
         pipe.safety_checker = lambda images, clip_input: (images, False)
         pipe = pipe.to(device)
         # best_image = imagenet_inversion.main()
         # torch.save(best_image, 'best_image_sdedit.pt')
-        vutils.save_image(denormalize(best_image)[i],f"sdedit/{init_latent_img_file}_{i}.png",normalize=True, scale_each=True, nrow=int(10))
+        vutils.save_image(denormalize(best_image)[i],f"sdedit/{init_latent_img_file}2_{i}.png",normalize=True, scale_each=True, nrow=int(10))
         # response = requests.get(url)
         #init_image = Image.open(BytesIO(response.content)).convert("RGB")
-        init_image = Image.open(f'/home/hyunsoo/inversion/DF_synthesis_LDM/sdedit/{init_latent_img_file}_{i}.png').convert("RGB")
+        init_image = Image.open(f'/home/hyunsoo/inversion/DF_synthesis_LDM/sdedit/{init_latent_img_file}2_{i}.png').convert("RGB")
         #init_image = Image.open(f'{init_latent_img_file}_{i}.png').convert("RGB")
         init_image = init_image.resize((512, 512))
 
         prompt = "An airplane"
 
-        images = pipe(prompt=prompt, image=init_image, strength=0.72, guidance_scale=15,classifier = model).images
-        images[0].save(f"./airplane_di_{step}.png")
+        images = pipe(prompt=prompt, image=init_image, strength=0.8, guidance_scale=15,classifier = model).images
+        images[0].save(f"./airplane_di_2_{step}.png")
 
         images_pt = to_tensor(images[0])
         images_pt = images_pt.reshape((1,3,512,512))

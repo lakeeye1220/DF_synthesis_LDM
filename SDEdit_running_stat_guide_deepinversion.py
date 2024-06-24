@@ -95,6 +95,7 @@ def get_image_prior_losses(inputs_jit):
 class DeepInversionClass(object):
     def __init__(self, bs=1,
                  use_fp16=True, net_teacher=None, path="./gen_images/",
+                 init_image=None,
                  final_data_path="/gen_images_final/",
                  parameters=dict(),
                  setting_id=0,
@@ -180,7 +181,7 @@ class DeepInversionClass(object):
 
         self.num_generations = 0
         self.final_data_path = final_data_path
-
+        self.init_image = init_image
         ## Create folders for images and logs
         prefix = path
         self.prefix = prefix
@@ -203,8 +204,8 @@ class DeepInversionClass(object):
                 # print('module :',module)
                 self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
                 self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
-                print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
-                print('self.mean_and_var :',len(self.mean_and_var))
+                # print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
+                # print('self.mean_and_var :',len(self.mean_and_var))
 
         self.hook_for_display = None
         if hook_for_display is not None:
@@ -238,9 +239,14 @@ class DeepInversionClass(object):
         img_original = self.image_resolution
 
         data_type = torch.half if use_fp16 else torch.float
-        inputs = torch.randn((self.bs, 3, img_original, img_original), requires_grad=True, device='cuda',
-                             dtype=data_type)
-        # print('inputs.shape :',inputs.shape)
+        if self.init_image == None:
+            inputs = torch.randn((self.bs, 3, img_original, img_original), requires_grad=True, device='cuda',
+                                dtype=data_type)
+        else:
+            ### TODO : MAYBE need to reshape to 224 224 from 512 512 (ref above shape)
+            inputs = self.init_image.requires_grad_(True).to('cuda')
+        print('inputs.shape :',inputs.shape)
+        print(inputs)
         pooling_function = nn.modules.pooling.AvgPool2d(kernel_size=2)
 
         if self.setting_id==0:
@@ -310,7 +316,8 @@ class DeepInversionClass(object):
 
                 outputs = net_teacher(inputs_jit)
                 outputs = self.network_output_function(outputs).logits
-
+                outputs = outputs[0]
+                targets = targets.float()
                 # R_cross classification loss
                 loss = criterion(outputs, targets)
 
@@ -358,7 +365,8 @@ class DeepInversionClass(object):
                             print('loss_verifier_cig', loss_verifier_cig.item())
 
                 # l2 loss on images
-                loss_l2 = torch.norm(inputs_jit.view(self.bs, -1), dim=1).mean()
+                # loss_l2 = torch.norm(inputs_jit.view(self.bs, -1), dim=1).mean()
+                loss_l2 = torch.norm(inputs_jit, dim=1).mean()
 
                 # combining losses
                 loss_aux = self.var_scale_l2 * loss_var_l2 + \
@@ -370,7 +378,7 @@ class DeepInversionClass(object):
                     loss_aux += self.adi_scale * loss_verifier_cig
 
                 loss = self.main_loss_multiplier * loss + loss_aux
-
+                loss.requires_grad_(True)
                 if local_rank==0:
                     if iteration % save_every==0:
                         print("------------iteration {}----------".format(iteration))

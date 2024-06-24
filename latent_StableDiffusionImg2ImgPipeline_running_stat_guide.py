@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 import PIL.Image
 import torch
+import torch.nn.functional as F
 import torchvision.utils as vutils
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
@@ -88,6 +89,21 @@ class DeepInversionFeatureHook():
         r_feature = torch.norm(module.running_var.data - var, 2) + torch.norm(
             module.running_mean.data - mean, 2)
         self.r_feature = r_feature
+
+    def close(self):
+        self.hook.remove()
+
+class DeepInversionFeatureHook_for_mean_and_var():
+    '''
+    Implementation of the forward hook to track feature statistics and compute a loss on them.
+    Will compute mean and variance, and will use l2 as a loss
+    '''
+    def __init__(self, module):
+        self.hook = module.register_forward_hook(self.hook_fn)
+
+    def hook_fn(self, module, input, output):
+        mean_and_var_lst = (module.running_mean.data, module.running_var.data)
+        self.mean_and_var_lst = mean_and_var_lst
 
     def close(self):
         self.hook.remove()
@@ -1027,7 +1043,9 @@ class StableDiffusionImg2ImgPipeline(
                 batch_size * num_images_per_prompt,
                 self.do_classifier_free_guidance,
             )
-
+        
+        store_processor = CrossAttnStoreProcessor()
+        self.unet.mid_block.attentions[0].transformer_blocks[0].attn1.processor = store_processor
         # 4. Preprocess image
         image = self.image_processor.preprocess(image)
 
@@ -1070,81 +1088,143 @@ class StableDiffusionImg2ImgPipeline(
         self._num_timesteps = len(timesteps)
 
         self.loss_r_feature_layers = []
+        self.mean_and_var = []
         classifier.eval()
         for module in classifier.modules():
             if isinstance(module, torch.nn.BatchNorm2d):
                 self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
+                self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
                 #print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                if self.interrupt:
-                    continue
-                with torch.enable_grad():
-                    latents = latents.detach().requires_grad_(True)
+        map_size = None
+
+        def get_map_size(module, input, output):
+            nonlocal map_size
+            map_size = output[0].shape[-2:]
+
+        with self.unet.mid_block.attentions[0].register_forward_hook(get_map_size):
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                mean_lst = []
+                var_lst = []
+                for i, t in enumerate(timesteps):
+                    print(f'now time step t is {t}')
+                    if self.interrupt:
+                        continue
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
                     input_latents = 1/0.18215*latent_model_input
                     image = self.vae.decode(input_latents).sample
                     image = (image / 2 + 0.5).clamp(0, 1)
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                #image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-                #input_latents = 1/0.18215*latent_model_input
-                #image = self.vae.decode(input_latents).sample
-                #image = (image / 2 + 0.5).clamp(0, 1)
-
-                with torch.enable_grad():
-                    #x_in = image.detach().requires_grad_(True)
-                    #x_in_temp  = torch.nn.functional.interpolate(x_in, size=224)#.detach().requires_grad_(True)
-                    x_in_temp  = torch.nn.functional.interpolate(image, size=224)#.detach().requires_grad_(True)
-                    out = classifier(x_in_temp)
-                    #loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) if idx>=len(self.loss_r_feature_layers)])
+                    # predict the noise residual
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep_cond=timestep_cond,
+                        cross_attention_kwargs=self.cross_attention_kwargs,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
+                    # perform guidance
+                    if self.do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                    x_in  = torch.nn.functional.interpolate(image, size=224)
+                    x_in = x_in.float()
+                    out = classifier(x_in)
+                    if i == 0:
+                        for (j, mod) in enumerate(self.mean_and_var):
+                            # print('mod :',mod)
+                            # print('mean :',mod.mean_and_var_lst[0].mean())
+                            mean_lst.append(mod.mean_and_var_lst[0].mean().detach().item())
+                            var_lst.append(mod.mean_and_var_lst[1].mean().detach().item())
+                            # print('var :',mod.mean_and_var_lst[1].mean())
+                    # print("mean_lst :",len(mean_lst))
+                    # print("max_mean_lst :",max(mean_lst))
+                    # print("var_lst :",len(var_lst))
+                    # print("max_var_lst :",max(var_lst))
+                        #print("r_graD : ",r_grad.shape) # 1 3 224 224
+                    #image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                    #input_latents = 1/0.18215*latent_model_input
+                    #image = self.vae.decode(input_latents).sample
+                    #image = (image / 2 + 0.5).clamp(0, 1)
+                    # if t > 600:
+                        # print(3)
+                        # with torch.enable_grad():
+                            #x_in = image.detach().requires_grad_(True)
+                            #x_in_temp  = torch.nn.functional.interpolate(x_in, size=224)#.detach().requires_grad_(True)
+                            # x_in_temp  = torch.nn.functional.interpolate(image, size=224)#.detach().requires_grad_(True)
+                            # out = classifier(x_in_temp)
+                            #loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) if idx>=len(self.loss_r_feature_layers)])
+                            # loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) ])#if idx >= 30])
+                            # r_grad = torch.autograd.grad(0.01*loss_r_feature.sum(), latents)[0]
+                            #print("r_grad  : ",r_grad)
+                            #grad_latent = retrieve_latents(self.vae.encode(r_grad), generator=generator)
+                            #print("grad_latent shape :",grad_latent.shape)
+                            # print("r_graD : ",r_grad.shape) # 1 3 224 224
+                            # print("r_graD : ",r_grad.mean(), "r_graD var :",torch.exp(0.5 * r_grad.var())) # 1s
+                            # latents = latents - r_grad
+                            # del r_grad
+                    # else:
+                        # print(4)
+                        # x_in_temp  = torch.nn.functional.interpolate(image, size=224)#.detach().requires_grad_(True)
+                        # out = classifier(x_in_temp)
+                        #loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) if idx>=len(self.loss_r_feature_layers)])
+                        # loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) ])#if idx >= 30])
+                        # r_grad = torch.autograd.grad(0.01*loss_r_feature.sum(), latents)[0]
+                        #print("r_grad  : ",r_grad)
+                        #grad_latent = retrieve_latents(self.vae.encode(r_grad), generator=generator)
+                        #print("grad_latent shape :",grad_latent.shape)
+                        # print("r_graD : ",r_grad.shape) # 1 3 224 224
+                        # print("r_graD : ",r_grad.mean(), "r_graD var :",torch.exp(0.5 * r_grad.var())) # 1s
+                        # latents = latents - r_grad
+                        
                     loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers) ])#if idx >= 30])
-                    r_grad = torch.autograd.grad(0.01*loss_r_feature.sum(), latents)[0]
-                    #print("r_grad  : ",r_grad)
-                    #grad_latent = retrieve_latents(self.vae.encode(r_grad), generator=generator)
-                    #print("grad_latent shape :",grad_latent.shape)
-                    #print("r_graD : ",r_grad.shape) # 1 3 224 224
-                    print("r_graD : ",r_grad.mean(), "r_graD var :",torch.exp(0.5 * r_grad.var())) # 1s
-                    latents = latents - r_grad
-                    
+                    pred_x0 = self.pred_x0(latents, noise_pred_uncond, t)
+                    uncond_attn, cond_attn = store_processor.attention_probs.chunk(2)
+                    mu = sum(mean_lst)/len(mean_lst)
+                    sigma = (sum(var_lst)/len(var_lst)) ** 0.5
+                    # mu = mean_lst[i]
+                    # sigma = var_lst[i] ** 0.5
+                    # mu = max(mean_lst)
+                    # sigma = max(var_lst) ** 0.5
+                    degraded_latents = self.sag_masking(
+                        pred_x0, uncond_attn, map_size, t, self.pred_epsilon(latents, noise_pred_uncond, t), mu, sigma
+                        )
+                    uncond_emb, _ = prompt_embeds.chunk(2)
+                    degraded_pred = self.unet(
+                        degraded_latents,
+                        t,
+                        encoder_hidden_states=uncond_emb,
+                        added_cond_kwargs=added_cond_kwargs
+                    ).sample
+                    # print('noise_pred :',noise_pred)
+                    # print('(noise_pred_uncond - degraded_pred) :',(noise_pred_uncond - degraded_pred))
+                    noise_pred += 0.75 * (noise_pred_uncond - degraded_pred)
+
                     #noise_pred = noise_pred+r_grad.mean()*1e3
                     #noise_pred = noise_pred + grad_latent*0.5e-4
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    # del noise_pred
                     #image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-                    #vutils.save_image(image.detach(),f'./{i}_intermediate image.png',normalize=True, scale_each=True, nrow=int(1))
+                    vutils.save_image(image.detach(),f'./{i}_intermediate image.png',normalize=True, scale_each=True, nrow=int(1))
 
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                    if callback_on_step_end is not None:
+                        callback_kwargs = {}
+                        for k in callback_on_step_end_tensor_inputs:
+                            callback_kwargs[k] = locals()[k]
+                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
 
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                        latents = callback_outputs.pop("latents", latents)
+                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                        negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            step_idx = i // getattr(self.scheduler, "order", 1)
+                            callback(step_idx, t, latents)
 
                 
 
@@ -1160,9 +1240,10 @@ class StableDiffusionImg2ImgPipeline(
         if has_nsfw_concept is None:
             do_denormalize = [True] * image.shape[0]
         else:
-            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+            pass
+            # do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        image = self.image_processor.postprocess(image, output_type=output_type) # , do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -1171,3 +1252,129 @@ class StableDiffusionImg2ImgPipeline(
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    
+    def pred_epsilon(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_eps = model_output
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_eps = (sample - (alpha_prod_t**0.5) * model_output) / (beta_prod_t**0.5)
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_eps = (beta_prod_t**0.5) * sample + (alpha_prod_t**0.5) * model_output
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_eps
+    
+    def sag_masking(self, original_latents, attn_map, map_size, t, eps, mu, sigma):
+        # Same masking process as in SAG paper: https://arxiv.org/pdf/2210.00939.pdf
+        bh, hw1, hw2 = attn_map.shape
+        b, latent_channel, latent_h, latent_w = original_latents.shape
+        h = self.unet.config.attention_head_dim
+        if isinstance(h, list):
+            h = h[-1]
+
+        # Produce attention mask
+        attn_map = attn_map.reshape(b, h, hw1, hw2)
+        attn_mask = attn_map.mean(1, keepdim=False).sum(1, keepdim=False) > 1.0
+        attn_mask = (
+            attn_mask.reshape(b, map_size[0], map_size[1])
+            .unsqueeze(1)
+            .repeat(1, latent_channel, 1, 1)
+            .type(attn_map.dtype)
+        )
+        attn_mask = F.interpolate(attn_mask, (latent_h, latent_w))
+
+        # Blur according to the self-attention mask
+        degraded_latents = gaussian_blur_2d(original_latents, kernel_size=9, mu=mu, sigma=sigma)
+        # degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
+        degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
+
+        # Noise it again to match the noise level
+        degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=t[None])
+
+        return degraded_latents
+    
+    def pred_x0(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep].to(sample.device)
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            # predict V
+            model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_original_sample
+    
+class CrossAttnStoreProcessor:
+    def __init__(self):
+        self.attention_probs = None
+
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+    ):
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        self.attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        hidden_states = torch.bmm(self.attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
+    
+# Gaussian blur
+def gaussian_blur_2d(img, kernel_size, mu, sigma):
+    ksize_half = (kernel_size - 1) * 0.5
+
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+
+    pdf = torch.exp(-0.5 * ( (x - mu) / sigma).pow(2))
+
+    x_kernel = pdf / pdf.sum()
+    x_kernel = x_kernel.to(device=img.device, dtype=img.dtype)
+
+    kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+
+    img = F.pad(img, padding, mode="reflect")
+    img = F.conv2d(img, kernel2d, groups=img.shape[-3])
+
+    return img

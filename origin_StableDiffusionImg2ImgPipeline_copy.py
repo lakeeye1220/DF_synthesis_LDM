@@ -40,7 +40,7 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion  import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from torchvision.utils import save_image
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -73,54 +73,12 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-class DeepInversionFeatureHook():
-    '''
-    Implementation of the forward hook to track feature statistics and compute a loss on them.
-    Will compute mean and variance, and will use l2 as a loss
-    '''
-    def __init__(self, module):
-        self.hook = module.register_forward_hook(self.hook_fn)
-
-    def hook_fn(self, module, input, output):
-        nch = input[0].shape[1]
-        mean = input[0].mean([0, 2, 3])
-        var = input[0].permute(1, 0, 2, 3).contiguous().view([nch, -1]).var(1, unbiased=False)
-        # print('mean.mean() :',mean.mean())
-        # print('var.mean() :',var.mean())
-
-        # print('module.running_mean.data :',module.running_mean.data.mean())
-        # print('module.running_var.data :',module.running_var.data.mean())
-        r_feature = torch.norm(module.running_var.data - var, 2) + torch.norm(
-            module.running_mean.data - mean, 2)
-        self.r_feature = r_feature
-
-    def close(self):
-        self.hook.remove()
-
-class DeepInversionFeatureHook_for_mean_and_var():
-    '''
-    Implementation of the forward hook to track feature statistics and compute a loss on them.
-    Will compute mean and variance, and will use l2 as a loss
-    '''
-    def __init__(self, module):
-        self.hook = module.register_forward_hook(self.hook_fn)
-
-    def hook_fn(self, module, input, output):
-        mean_and_var_lst = (module.running_mean.data, module.running_var.data)
-        self.mean_and_var_lst = mean_and_var_lst
-
-    def close(self):
-        self.hook.remove()
-
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
 ):
-    print('encoder_output :',encoder_output)
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
-        print('encoder_output.latent_dist.sample(generator).shape :',encoder_output.latent_dist.sample(generator).shape)
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
-        print('encoder_output.latent_dist.mode().shape :',encoder_output.latent_dist.mode().shape)
         return encoder_output.latent_dist.mode()
     elif hasattr(encoder_output, "latents"):
         return encoder_output.latents
@@ -757,7 +715,7 @@ class StableDiffusionImg2ImgPipeline(
             )
 
         image = image.to(device=device, dtype=dtype)
-        print('image :',image)
+
         batch_size = batch_size * num_images_per_prompt
 
         if image.shape[1] == 4:
@@ -775,16 +733,11 @@ class StableDiffusionImg2ImgPipeline(
                     retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
                     for i in range(batch_size)
                 ]
-                print('init_latents.shape :',init_latents.shape)
                 init_latents = torch.cat(init_latents, dim=0)
-                print('init_latents.shape :',init_latents.shape)
             else:
                 init_latents = retrieve_latents(self.vae.encode(image), generator=generator)
-                print('init_latents.shape :',init_latents.shape)
 
             init_latents = self.vae.config.scaling_factor * init_latents
-            print('self.vae.config.scaling_factor :',self.vae.config.scaling_factor)
-            print('init_latents.shape :',init_latents.shape)
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -808,10 +761,7 @@ class StableDiffusionImg2ImgPipeline(
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
 
         # get latents
-        print('timestep :',timestep)
-        print('init_latents.shape :',init_latents.shape)
         init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
-        print('init_latents.shape :',init_latents.shape)
         latents = init_latents
 
         return latents
@@ -896,7 +846,6 @@ class StableDiffusionImg2ImgPipeline(
         clip_skip: int = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        classifier: Optional[torch.FloatTensor]=None,
         **kwargs,
     ):
         r"""
@@ -1071,7 +1020,7 @@ class StableDiffusionImg2ImgPipeline(
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
         # print('latent_timestep :', latent_timestep) # 741
 
-        # 6. Prepare latent variables # 이 부분 다시 봐보기 .. latents 초깃값?
+        # 6. Prepare latent variables
         latents = self.prepare_latents(
             image,
             latent_timestep,
@@ -1104,16 +1053,6 @@ class StableDiffusionImg2ImgPipeline(
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         # print('num_warmup_steps :',num_warmup_steps) # 1
         self._num_timesteps = len(timesteps)
-
-        self.loss_r_feature_layers = []
-        self.mean_and_var = []
-        classifier.eval()
-        for module in classifier.modules():
-            if isinstance(module, torch.nn.BatchNorm2d):
-                self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
-                self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
-                # print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
-        
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -1140,39 +1079,9 @@ class StableDiffusionImg2ImgPipeline(
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-                
-                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-                with torch.enable_grad():
-                    x_in  = torch.nn.functional.interpolate(image, size=224).detach().requires_grad_(True)
-                    x_in = x_in.float()
-                    out = classifier(x_in)
-                    mean_lst = []
-                    var_lst = []
-                    for (i, mod) in enumerate(self.mean_and_var):
-                        # print('mod :',mod)
-                        # print('mean :',mod.mean_and_var_lst[0].mean())
-                        mean_lst.append(mod.mean_and_var_lst[0].mean())
-                        var_lst.append(mod.mean_and_var_lst[1].mean())
-                        # print('var :',mod.mean_and_var_lst[1].mean())
-                    print("mean_lst :",mean_lst)
-                    print("max_mean_lst :",max(mean_lst))
-                    print("var_lst :",var_lst)
-                    print("max_var_lst :",max(var_lst))
-                    loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers)])
-                    r_grad = torch.autograd.grad(0.005*loss_r_feature.sum(), x_in)[0]
-                    #print("r_graD : ",r_grad.shape) # 1 3 224 224
-                    print("r_graD : ",r_grad.mean()*0.4e5, "r_graD var :",torch.exp(0.5 * r_grad.var()) )# 1s
-                #noise_pred_text = noise_pred_text - 1e5*r_grad.mean() * self.guidance_scale
-                noise_pred = noise_pred+r_grad.mean()*0.4e5
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-
                 # print('noise_pred.shape :',noise_pred.shape) # torch.Size([1, 4, 64, 64])
-                self.noise2image(generator,noise_pred, t, "noise_pred")
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                self.noise2image(generator,latents, t, "after_scheduler_step")
                 # print('latents.shape :',latents.shape) # torch.Size([1, 4, 64, 64])
                 if callback_on_step_end is not None:
                     print('None')
@@ -1206,10 +1115,9 @@ class StableDiffusionImg2ImgPipeline(
         if has_nsfw_concept is None:
             do_denormalize = [True] * image.shape[0]
         else:
-            do_denormalize = [True] * image.shape[0]
-            # do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type) #, do_denormalize=do_denormalize)
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -1218,9 +1126,3 @@ class StableDiffusionImg2ImgPipeline(
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-    
-    def noise2image(self,generator,noise,t,save_prompt):
-        # noise = noise.float()
-        print('noise.shape :',noise.shape)
-        image = self.vae.decode(noise / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-        save_image(image[0], f"./a_airplane_di_after_test_{t}_{save_prompt}.png")

@@ -178,13 +178,13 @@ def train(config: RunConfig, accelerator):
             print(f"Token already exist at {token_path}")
             return
         else:
-            # best_image = imagenet_inversion.main()
+            best_image = imagenet_inversion.main()
             # print('total_mean :',total_mean)
             # print('total_var :',total_var)
             # total_mean = -1.5365
             # total_var = 6.9936**0.5
-            # torch.save(best_image, 'best_image0513.pt')
-            # best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/best_image0513.pt', weights_only=True)
+            torch.save(best_image, 'diplustsd.pt')
+            best_image = torch.load('/home/hyunsoo/inversion/DF_synthesis_LDM/diplustsd.pt', weights_only=True)
             for running_class_index, class_name in IDX2NAME.items():
                 print(f"Current step's running_class_index is {running_class_index}")
                 print(f"Current step's class_name is {class_name}")
@@ -194,9 +194,9 @@ def train(config: RunConfig, accelerator):
                 generator.manual_seed(config.seed)
                 
                 ## make Deepinversion image
-                # vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
+                vutils.save_image(denormalize(best_image[running_class_index]),f"{config.init_latent_img_file}_{running_class_index}.png",normalize=True, scale_each=True, nrow=int(10))
                 # vutils.save_image(denormalize(best_image),f"{config.init_latent_img_file}.png",normalize=True, scale_each=True, nrow=int(10))
-                # init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
+                init_latent = return_DDIM_latent(f"{config.init_latent_img_file}.png").to(dtype=weight_dtype)
                 # init_latent = init_latent * total_mean + total_var
                 class_name = class_name.split(",")[0]
                 print(f"Start training class token for {class_name}")

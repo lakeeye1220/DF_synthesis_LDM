@@ -85,11 +85,6 @@ class DeepInversionFeatureHook():
         nch = input[0].shape[1]
         mean = input[0].mean([0, 2, 3])
         var = input[0].permute(1, 0, 2, 3).contiguous().view([nch, -1]).var(1, unbiased=False)
-        # print('mean.mean() :',mean.mean())
-        # print('var.mean() :',var.mean())
-
-        # print('module.running_mean.data :',module.running_mean.data.mean())
-        # print('module.running_var.data :',module.running_var.data.mean())
         r_feature = torch.norm(module.running_var.data - var, 2) + torch.norm(
             module.running_mean.data - mean, 2)
         self.r_feature = r_feature
@@ -106,8 +101,8 @@ class DeepInversionFeatureHook_for_mean_and_var():
         self.hook = module.register_forward_hook(self.hook_fn)
 
     def hook_fn(self, module, input, output):
-        mean_and_var_lst = (module.running_mean.data, module.running_var.data)
-        self.mean_and_var_lst = mean_and_var_lst
+        mean_and_var = (module.running_mean.data, module.running_var.data)
+        self.mean_and_var = mean_and_var
 
     def close(self):
         self.hook.remove()
@@ -757,7 +752,7 @@ class StableDiffusionImg2ImgPipeline(
             )
 
         image = image.to(device=device, dtype=dtype)
-        print('image :',image)
+        # print('image :',image)
         batch_size = batch_size * num_images_per_prompt
 
         if image.shape[1] == 4:
@@ -775,16 +770,16 @@ class StableDiffusionImg2ImgPipeline(
                     retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
                     for i in range(batch_size)
                 ]
-                print('init_latents.shape :',init_latents.shape)
+                # print('init_latents.shape :',init_latents.shape)
                 init_latents = torch.cat(init_latents, dim=0)
-                print('init_latents.shape :',init_latents.shape)
+                # print('init_latents.shape :',init_latents.shape)
             else:
                 init_latents = retrieve_latents(self.vae.encode(image), generator=generator)
-                print('init_latents.shape :',init_latents.shape)
+                # print('init_latents.shape :',init_latents.shape)
 
             init_latents = self.vae.config.scaling_factor * init_latents
-            print('self.vae.config.scaling_factor :',self.vae.config.scaling_factor)
-            print('init_latents.shape :',init_latents.shape)
+            # print('self.vae.config.scaling_factor :',self.vae.config.scaling_factor)
+            # print('init_latents.shape :',init_latents.shape)
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -1113,12 +1108,12 @@ class StableDiffusionImg2ImgPipeline(
                 self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
                 self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
                 # print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
-        
+                
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-
+                
                 # expand the latents if we are doing classifier free guidance
                 # print('latents.shape :',latents.shape) # torch.Size([1, 4, 64, 64])
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
@@ -1140,39 +1135,57 @@ class StableDiffusionImg2ImgPipeline(
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                # print('noise_pred.shape :',noise_pred.shape) # torch.Size([1, 4, 64, 64])
+                image_test = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                # image_begin_test = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                # image_begin_test = self.decode_latents(latents)
+                # save_image(image_begin_test[0], f"./a_airplane_di_after_test_{t}_0_original.png")
+                # image_begin_test.save(f"./a_airplane_di_after_test_0_{t}.png")
+                # print('!'*100)
+                # pred_x0 = self.pred_x0(latents, noise_pred_uncond, t)
+                # print('pred_x0.shape :',pred_x0.shape)
                 
-                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                # visualize DDIM approximation
+                # image_test = self.vae.decode(pred_x0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                # save_image(image_test[0], f"./a_airplane_di_after_test_{t}_1_x0_approx.png")
+                # image_test_save, has_nsfw_concept = self.run_safety_checker(image_test, device, prompt_embeds.dtype)
+                # if has_nsfw_concept is None:
+                #     do_denormalize = [True] * image_test_save.shape[0]
+                # else:
+                #     # do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+                #     do_denormalize = [True] * image_test_save.shape[0]
+                # image_test_save = self.image_processor.postprocess(image_test, output_type=output_type) # , do_denormalize=do_denormalize)
+                # image_test_save[0].save(f"./a_airplane_di_after_test_{t}_2_x0_approx2.png")
+
                 with torch.enable_grad():
-                    x_in  = torch.nn.functional.interpolate(image, size=224).detach().requires_grad_(True)
+                    # print('image_test[0].shape :',image_test.shape)
+                    x_in  = torch.nn.functional.interpolate(image_test, size=224).detach().requires_grad_(True)
+                    # print('x_in.shape :',x_in.shape) 
                     x_in = x_in.float()
                     out = classifier(x_in)
-                    mean_lst = []
-                    var_lst = []
-                    for (i, mod) in enumerate(self.mean_and_var):
-                        # print('mod :',mod)
-                        # print('mean :',mod.mean_and_var_lst[0].mean())
-                        mean_lst.append(mod.mean_and_var_lst[0].mean())
-                        var_lst.append(mod.mean_and_var_lst[1].mean())
-                        # print('var :',mod.mean_and_var_lst[1].mean())
-                    print("mean_lst :",mean_lst)
-                    print("max_mean_lst :",max(mean_lst))
-                    print("var_lst :",var_lst)
-                    print("max_var_lst :",max(var_lst))
                     loss_r_feature = sum([mod.r_feature for (idx, mod) in enumerate(self.loss_r_feature_layers)])
                     r_grad = torch.autograd.grad(0.005*loss_r_feature.sum(), x_in)[0]
                     #print("r_graD : ",r_grad.shape) # 1 3 224 224
-                    print("r_graD : ",r_grad.mean()*0.4e5, "r_graD var :",torch.exp(0.5 * r_grad.var()) )# 1s
-                #noise_pred_text = noise_pred_text - 1e5*r_grad.mean() * self.guidance_scale
-                noise_pred = noise_pred+r_grad.mean()*0.4e5
+                    print("r_graD : ",r_grad.mean()*0.4e4, "r_graD var :",torch.exp(0.5 * r_grad.var()))
+                    # x_in = x_in + 0.4e4 * r_grad
+                    # x_in  = torch.nn.functional.interpolate(image_test, size=512)
+                    # x_in.save(f"./a_airplane_di_after_test3{t}.png")
+                    save_image(x_in, f"./a_airplane_di_after_test_{t}_3_after_addgrad.png")
+                    print('x_in.shape :',x_in.shape)
+                # latents = self.prepare_latents(
+                #     x_in,
+                #     t,
+                #     batch_size,
+                #     num_images_per_prompt,
+                #     prompt_embeds.dtype,
+                #     device,
+                #     generator,
+                #     )
+                noise_pred = noise_pred + 0.4e4 * r_grad
+                print('latents.shape :',latents.shape)
+                # degraded_latents = self.scheduler.add_noise(degraded_latents, noise=self.pred_epsilon(latents, noise_pred_uncond, t), timesteps=t[None])
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-
-                # print('noise_pred.shape :',noise_pred.shape) # torch.Size([1, 4, 64, 64])
-                self.noise2image(generator,noise_pred, t, "noise_pred")
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                self.noise2image(generator,latents, t, "after_scheduler_step")
                 # print('latents.shape :',latents.shape) # torch.Size([1, 4, 64, 64])
                 if callback_on_step_end is not None:
                     print('None')
@@ -1198,7 +1211,8 @@ class StableDiffusionImg2ImgPipeline(
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
                 0
             ]
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            # image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            has_nsfw_concept = None
         else:
             image = latents
             has_nsfw_concept = None
@@ -1206,10 +1220,9 @@ class StableDiffusionImg2ImgPipeline(
         if has_nsfw_concept is None:
             do_denormalize = [True] * image.shape[0]
         else:
-            do_denormalize = [True] * image.shape[0]
-            # do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type) #, do_denormalize=do_denormalize)
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -1219,8 +1232,22 @@ class StableDiffusionImg2ImgPipeline(
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
     
-    def noise2image(self,generator,noise,t,save_prompt):
-        # noise = noise.float()
-        print('noise.shape :',noise.shape)
-        image = self.vae.decode(noise / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-        save_image(image[0], f"./a_airplane_di_after_test_{t}_{save_prompt}.png")
+    def pred_x0(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep].to(sample.device)
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            # predict V
+            model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_original_sample
