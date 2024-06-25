@@ -1,0 +1,15 @@
+__pycache__
+*.jpg
+*.pdf
+pipeline_token
+wandb
+classifier
+generations
+*.pyc
+*.pt
+*.png
+*.pt
+diffusers
+run_log.txt
+deit_category_hf.txt
+resnet_category.txt

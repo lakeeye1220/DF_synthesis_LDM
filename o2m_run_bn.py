@@ -11,6 +11,7 @@ import utils
 import torch.nn.functional as F
 import math
 from inet_classes import IDX2NAME as IDX2NAME_INET
+from pacs_classes import IDX2NAME as IDX2NAME_PACS
 
 from o2m_run import RunConfig
 import pacs_classes
@@ -123,7 +124,7 @@ def train(config: RunConfig):
     if config.classifier == "inet" or config.classifier=="inet_resnet34":
         IDX2NAME = IDX2NAME_INET
     elif 'pacs' in config.classifier:
-        IDX2NAME = pacs_classes.IDX2NAME
+        IDX2NAME = IDX2NAME_PACS
     else:
         IDX2NAME = classification_model.config.id2label
 
@@ -145,7 +146,7 @@ def train(config: RunConfig):
         Path(img_dir_path).mkdir(parents=True, exist_ok=True)
 
         # Stable model
-        unet, vae, text_encoder, scheduler, tokenizer,_ = utils.prepare_stable(config)
+        unet, vae, text_encoder, scheduler, tokenizer, _ = utils.prepare_stable(config)
 
         # Extend tokenizer and add a discriminative token ###
         class_infer = config.class_index - 1
@@ -364,7 +365,9 @@ def train(config: RunConfig):
                                     #for j in range(10):
                                     out = classification_model(x_in_temp)
                                     loss_r_feature += sum([mod.r_feature for (idx, mod) in enumerate(loss_r_feature_layers)])#if idx >= 30])
-                                
+                                    # print('loss_r_feature :',loss_r_feature)
+                                    # print('latents :',latents)
+                                    # print('torch.autograd.grad(0.01*loss_r_feature, latents) :',torch.autograd.grad(0.01*loss_r_feature, latents)[0])
                                     r_grad = torch.autograd.grad(0.01*loss_r_feature, latents)[0]
                                     latents = latents - r_grad 
                                   
@@ -656,11 +659,13 @@ def evaluate(config: RunConfig):
 
     if config.classifier == "inet_resnet34":
         IDX2NAME = IDX2NAME_INET
+    elif 'pacs' in config.classifier:
+        IDX2NAME = IDX2NAME_PACS
     else:
         IDX2NAME = classification_model.config.id2label
 
     class_name = IDX2NAME[class_index].split(",")[0]
-
+    classification_model = classification_model.to(config.device)
     exp_identifier = (
         f'{config.exp_id}_{"2.1" if config.sd_2_1 else "1.4"}_{config.epoch_size}_{config.lr}_'
         f"{config.seed}_{config.number_of_prompts}_{config.early_stopping}"
@@ -714,8 +719,9 @@ def evaluate(config: RunConfig):
             #print("image np shape :",image_np.shape)
             
             #ptp_utils.view_images(image_np,prefix=config.prefix,postfix=f"{seed}_generated_img")
+            print(1)
             ptp_utils.view_images(image_np, num_rows=1, offset_ratio=0.02, prefix=config.prefix,postfix=f"/{seed}_generated_img")
-            
+            print(2)
             images = torch.nn.functional.interpolate(image_pt, size=224).to(config.device)
             if  config.classifier=="inet_resnet34" or 'pacs' in config.classifier:
                 output = classification_model(images)

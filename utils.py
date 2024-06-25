@@ -11,7 +11,7 @@ import torchvision.transforms as T
 import torch
 
 import kornia
-
+import StableDiffusionImg2ImgPipeline_running_stat_guide as Dgist_StableDiffusionImg2ImgPipeline
 
 # From timm.data.constants
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
@@ -56,6 +56,18 @@ def prepare_classifier(config):
         model = ViTForImageClassification.from_pretrained(
             "google/vit-large-patch16-224"
         ).cuda()
+
+    elif config.classifier =="inet_resnet34":
+        import torch
+        model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34', pretrained=True).cuda()
+
+    elif config.classifier == "imagenet_sketch":
+        from transformers import ResNetForImageClassification
+
+        model = ResNetForImageClassification.from_pretrained(
+            "kmewhort/resnet34-sketch-classifier"
+        ).to(config.device)
+
     elif config.classifier == "cub":
         from vitmae import CustomViTForImageClassification
 
@@ -68,6 +80,34 @@ def prepare_classifier(config):
         model = CustomViTForImageClassification.from_pretrained(
             "vesteinn/vit-mae-inat21"
         ).cuda()
+
+    elif config.classifier =='resnet34_cartoon_pacs':
+        import torch
+        model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34', pretrained=False)
+        model.fc = torch.nn.Linear(512,7)
+        model.load_state_dict(torch.load('../DF_synthesis_LDM/classifier/cartoon_model_0.617882.pt'))
+        model.eval()
+
+    elif config.classifier =='resnet34_art_pacs':
+        import torch
+        model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34', pretrained=False)
+        model.fc = torch.nn.Linear(512,7)
+        model.load_state_dict(torch.load('../DF_synthesis_LDM/classifier/from_scratch_art_model_0.547348.pt'))
+        model.eval()
+
+    elif config.classifier =='resnet34_sktech_pacs':
+        import torch
+        model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34', pretrained=False)
+        model.fc = torch.nn.Linear(512,7)
+        model.load_state_dict(torch.load('../DF_synthesis_LDM/classifier/sketch_model_0.174087.pt'))
+        model.eval()
+
+    elif config.classifier =='imagenet_r_art':
+        import torchvision 
+        model = torchvision.models.resnet50(pretrained=True)
+        model.fc = torch.nn.Linear(2048,8)
+        model.load_state_dict(torch.load('../concept_inversion/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_art_0.9436619718309859.pt'))
+        model = model.cuda()
 
     return model
 
@@ -86,16 +126,17 @@ def prepare_stable(config):
         pretrained_model_name_or_path, subfolder="text_encoder"
     )
     vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, subfolder="vae")
-    pipe = StableDiffusionPipeline.from_pretrained(pretrained_model_name_or_path).to(
-        "cuda"
-    )
+    #pipe = StableDiffusionPipeline.from_pretrained(pretrained_model_name_or_path).to(
+    #    "cuda"
+    #)
+    pipe = Dgist_StableDiffusionImg2ImgPipeline.StableDiffusionImg2ImgPipeline.from_pretrained(pretrained_model_name_or_path, text_encoder = text_encoder,torch_dtype=torch.float32).to("cuda")
     scheduler = pipe.scheduler
-    del pipe
+    #del pipe
     tokenizer = CLIPTokenizer.from_pretrained(
         pretrained_model_name_or_path, subfolder="tokenizer"
     )
 
-    return unet, vae, text_encoder, scheduler, tokenizer
+    return unet, vae, text_encoder, scheduler, tokenizer, pipe
 
 
 def save_progress(text_encoder, placeholder_token_id, accelerator, config, save_path):
@@ -106,3 +147,4 @@ def save_progress(text_encoder, placeholder_token_id, accelerator, config, save_
     )
     learned_embeds_dict = {config.placeholder_token: learned_embeds.detach().cpu()}
     torch.save(learned_embeds_dict, save_path)
+    

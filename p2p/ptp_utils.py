@@ -60,6 +60,7 @@ def view_images(images, num_rows=1, offset_ratio=0.02, prefix=None,postfix=None)
                 i * num_cols + j]
 
     pil_img = Image.fromarray(image_)
+    print("경로 : ", f"./{prefix}{postfix}.jpg")
     pil_img.save(f"./{prefix}{postfix}.jpg") 
 
 

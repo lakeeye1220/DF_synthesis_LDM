@@ -103,9 +103,10 @@ class AttentionStore(AttentionControl):
             for key in self.attention_store:
                 for i in range(len(self.attention_store[key])):
                     self.attention_store[key][i] += self.step_store[key][i]
-        print("attention layer length: ",len(self.attention_store))
+        # print("attention layer length: ",len(self.attention_store))
         for key in self.attention_store:
-            print("attention key : ",key)
+            pass
+            # print("attention key : ",key)
             #print("self attention value shape : ",self.attention_store[key])        
         self.step_store = self.get_empty_store()
 
