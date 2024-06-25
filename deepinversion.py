@@ -1,3 +1,12 @@
+# --------------------------------------------------------
+# Copyright (C) 2020 NVIDIA Corporation. All rights reserved.
+# Nvidia Source Code License-NC
+# Official PyTorch implementation of CVPR2020 paper
+# Dreaming to Distill: Data-free Knowledge Transfer via DeepInversion
+# Hongxu Yin, Pavlo Molchanov, Zhizhong Li, Jose M. Alvarez, Arun Mallya, Derek
+# Hoiem, Niraj K. Jha, and Jan Kautz
+# --------------------------------------------------------
+
 from __future__ import division, print_function
 from __future__ import absolute_import
 from __future__ import division
@@ -14,8 +23,13 @@ import torchvision.utils as vutils
 from PIL import Image
 import numpy as np
 
-from di_utils import lr_cosine_policy, lr_policy, beta_policy, mom_cosine_policy, clip, denormalize, create_folder
+import pyrallis
+from config import RunConfig
 
+from DF_synthesis_LDM.inversion_utils import lr_cosine_policy, lr_policy, beta_policy, mom_cosine_policy, clip, denormalize, create_folder
+
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 class DeepInversionFeatureHook():
     '''
@@ -26,18 +40,39 @@ class DeepInversionFeatureHook():
         self.hook = module.register_forward_hook(self.hook_fn)
 
     def hook_fn(self, module, input, output):
+        # print('###################################')
+        # print('input',input)
+        # print('input[0].shape :',input[0].shape)
         # hook co compute deepinversion's feature distribution regularization
         nch = input[0].shape[1]
         mean = input[0].mean([0, 2, 3])
         var = input[0].permute(1, 0, 2, 3).contiguous().view([nch, -1]).var(1, unbiased=False)
-
+        # print('input[0].shape :',input[0].shape)
+        # print('input[0].mean([0, 2, 3]).shape :',input[0].mean([0, 2, 3]).shape)
+        # print('module.running_mean.data.shape :',module.running_mean.data.shape)
         #forcing mean and variance to match between two distributions
         #other ways might work better, i.g. KL divergence
         r_feature = torch.norm(module.running_var.data - var, 2) + torch.norm(
             module.running_mean.data - mean, 2)
-
+        # print('sum(module.running_mean.data) :',module.running_mean.data.shape)
+        # print('sum(module.running_var.data) :',module.running_var.data.shape)
         self.r_feature = r_feature
         # must have no output
+
+    def close(self):
+        self.hook.remove()
+
+class DeepInversionFeatureHook_for_mean_and_var():
+    '''
+    Implementation of the forward hook to track feature statistics and compute a loss on them.
+    Will compute mean and variance, and will use l2 as a loss
+    '''
+    def __init__(self, module):
+        self.hook = module.register_forward_hook(self.hook_fn)
+
+    def hook_fn(self, module, input, output):
+        mean_and_var = (module.running_mean.data, module.running_var.data)
+        self.mean_and_var = mean_and_var
 
     def close(self):
         self.hook.remove()
@@ -58,7 +93,7 @@ def get_image_prior_losses(inputs_jit):
 
 
 class DeepInversionClass(object):
-    def __init__(self, bs=84,
+    def __init__(self, bs=1,
                  use_fp16=True, net_teacher=None, path="./gen_images/",
                  final_data_path="/gen_images_final/",
                  parameters=dict(),
@@ -127,6 +162,8 @@ class DeepInversionClass(object):
         self.criterion = criterion
         self.network_output_function = network_output_function
         do_clip = True
+        config = pyrallis.parse(config_class=RunConfig)
+        inversion_root = config.init_latent_img_file
 
         if "r_feature" in coefficients:
             self.bn_reg_scale = coefficients["r_feature"]
@@ -150,7 +187,7 @@ class DeepInversionClass(object):
         local_rank = torch.cuda.current_device()
         if local_rank==0:
             create_folder(prefix)
-            create_folder(prefix + "/best_images/")
+            create_folder(prefix + f"/best_images/{inversion_root}/")
             create_folder(self.final_data_path)
             # save images to folders
             # for m in range(1000):
@@ -158,16 +195,23 @@ class DeepInversionClass(object):
 
         ## Create hooks for feature statistics
         self.loss_r_feature_layers = []
-
+        self.mean_and_var = []
+        # print('self.net_teacher :',self.net_teacher)
         for module in self.net_teacher.modules():
             if isinstance(module, nn.BatchNorm2d):
+                # print('module :',module)
                 self.loss_r_feature_layers.append(DeepInversionFeatureHook(module))
+                # self.mean_and_var.append(DeepInversionFeatureHook_for_mean_and_var(module))
+                #print('self.loss_r_feature_layers :',len(self.loss_r_feature_layers))
+                # print('self.mean_and_var :',len(self.mean_and_var))
 
         self.hook_for_display = None
         if hook_for_display is not None:
             self.hook_for_display = hook_for_display
 
     def get_images(self, net_student=None, targets=None):
+        config = pyrallis.parse(config_class=RunConfig)
+        inversion_root = config.init_latent_img_file
         print("get_images call")
 
         net_teacher = self.net_teacher
@@ -182,21 +226,20 @@ class DeepInversionClass(object):
         # setup target labels
         if targets is None:
             #only works for classification now, for other tasks need to provide target vector
-            targets = torch.LongTensor([random.randint(0, 5) for _ in range(self.bs)]).to('cuda')
+            targets = torch.LongTensor([random.randint(0, 999) for _ in range(self.bs)]).to('cuda')
             if not self.random_label:
                 # preselected classes, good for ResNet50v1.5
-                targets = [1, 933, 946, 980, 25, 63, 92, 94, 107, 985, 151, 154, 207, 250, 270, 277, 283, 292, 294, 309,
-                           311,
-                           325, 340, 360, 386, 402, 403, 409, 530, 440, 468, 417, 590, 670, 817, 762, 920, 949, 963,
-                           967, 574, 487]
+                targets = [i for i in range(250)]
 
                 targets = torch.LongTensor(targets * (int(self.bs / len(targets)))).to('cuda')
-        targets = torch.LongTensor([0,1,2,3,4,5,6,7,8,9]).to('cuda')
+        
+        targets = torch.LongTensor([0,1,2,3,4,5,6] * (int(self.bs / 7))).to('cuda') #PACS dataset
         img_original = self.image_resolution
 
         data_type = torch.half if use_fp16 else torch.float
         inputs = torch.randn((self.bs, 3, img_original, img_original), requires_grad=True, device='cuda',
                              dtype=data_type)
+        # print('inputs.shape :',inputs.shape)
         pooling_function = nn.modules.pooling.AvgPool2d(kernel_size=2)
 
         if self.setting_id==0:
@@ -207,9 +250,9 @@ class DeepInversionClass(object):
         iteration = 0
         for lr_it, lower_res in enumerate([2, 1]):
             if lr_it==0:
-                iterations_per_layer = 2000
+                iterations_per_layer = 200#0
             else:
-                iterations_per_layer = 1000 if not skipfirst else 2000
+                iterations_per_layer = 100#0 if not skipfirst else 2000
                 if self.setting_id == 2:
                     iterations_per_layer = 20000
 
@@ -262,20 +305,27 @@ class DeepInversionClass(object):
                 # forward pass
                 optimizer.zero_grad()
                 net_teacher.zero_grad()
-                
-                #inputs_jit = torch.nn.functional.interpolate(inputs_jit, size=224)
+
                 outputs = net_teacher(inputs_jit)
-                outputs = self.network_output_function(outputs)
+                #outputs = self.network_output_function(outputs).logits
+
                 # R_cross classification loss
-                loss = criterion(outputs.logits, targets)
+                loss = criterion(outputs, targets)
 
                 # R_prior losses
                 loss_var_l1, loss_var_l2 = get_image_prior_losses(inputs_jit)
 
                 # R_feature loss
                 rescale = [self.first_bn_multiplier] + [1. for _ in range(len(self.loss_r_feature_layers)-1)]
+                # print('@@@@@@@@@@@@')
+                # print('self.loss_r_feature_layers :', self.loss_r_feature_layers)
+                # print('len(self.loss_r_feature_layers) :', len(self.loss_r_feature_layers))
                 loss_r_feature = sum([mod.r_feature * rescale[idx] for (idx, mod) in enumerate(self.loss_r_feature_layers)])
-
+                # mean_lst = [(mod.mean_and_var[0]).mean() for (idx, mod) in enumerate(self.mean_and_var)]
+                # var_lst = [(mod.mean_and_var[1]).mean() for (idx, mod) in enumerate(self.mean_and_var)]
+                # total_mean = sum(mean_lst) / 36
+                # total_var = sum(var_lst) / 36
+                # print('loss_r_feature :',loss_r_feature)
                 # R_ADI
                 loss_verifier_cig = torch.zeros(1)
                 if self.adi_scale!=0.0:
@@ -285,7 +335,7 @@ class DeepInversionClass(object):
                         outputs_student = net_student(inputs_jit)
 
                     T = 3.0
-                    if 0:
+                    if 1:
                         T = 3.0
                         # Jensen Shanon divergence:
                         # another way to force KL between negative probabilities
@@ -324,7 +374,7 @@ class DeepInversionClass(object):
                         print("------------iteration {}----------".format(iteration))
                         print("total loss", loss.item())
                         print("loss_r_feature", loss_r_feature.item())
-                        print("main criterion", criterion(outputs.logits, targets).item())
+                        print("main criterion", criterion(outputs, targets).item())
 
                         if self.hook_for_display is not None:
                             self.hook_for_display(inputs, targets)
@@ -347,10 +397,10 @@ class DeepInversionClass(object):
                     best_inputs = inputs.data.clone()
                     best_cost = loss.item()
 
-                if iteration % save_every==0 and (save_every > 0):
+                if iteration % save_every == 0 and (save_every > 0):
                     if local_rank==0:
                         vutils.save_image(denormalize(inputs.detach()),
-                                          '{}/best_images/output_{:05d}_gpu_{}.png'.format(self.prefix,
+                                          '{}/best_images/{}/output_{:05d}_gpu_{}.png'.format(self.prefix,inversion_root,
                                                                                            iteration // save_every,
                                                                                            local_rank),
                                           normalize=True, scale_each=True, nrow=int(10))
@@ -362,7 +412,8 @@ class DeepInversionClass(object):
         # to reduce memory consumption by states of the optimizer we deallocate memory
         optimizer.state = collections.defaultdict(dict)
 
-        return best_inputs.detach()
+        # return best_inputs, total_mean, total_var
+        return best_inputs
 
     def save_images(self, images, targets):
         # method to store generated images locally
@@ -398,9 +449,12 @@ class DeepInversionClass(object):
             if use_fp16:
                 targets = targets.half()
 
-        best_input = self.get_images(net_student=net_student, targets=targets)
+        # best_image, total_mean, total_var = self.get_images(net_student=net_student, targets=targets)
+        best_image = self.get_images(net_student=net_student, targets=targets)
 
         net_teacher.eval()
 
         self.num_generations += 1
-        return best_input
+
+        # return best_image, total_mean, total_var
+        return best_image
