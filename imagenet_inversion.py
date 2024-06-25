@@ -77,12 +77,12 @@ def run(args, step):
 
     ### load models
     if args.arch_name=="resnet50":
-        # path_to_model = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/imagenet-r_subset_by_domain/lr001_resnet50_p_T_imagenet-r_lpips_subset_sketch_0.944206008583691.pt"
-        # net = torchvision.models.resnet50(pretrained=True)
-        # net.fc = torch.nn.Linear(2048,10)
-        # net.load_state_dict(torch.load(path_to_model))
-        feature_extractor = AutoFeatureExtractor.from_pretrained("kmewhort/resnet34-sketch-classifier")
-        net = ResNetForImageClassification.from_pretrained("kmewhort/resnet34-sketch-classifier")
+        net = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34', pretrained=False)
+        path_to_model = "/home/hyunsoo/inversion/DF_synthesis_LDM/classifier/cartoon_model_0.617882.pt"
+        net.fc = torch.nn.Linear(512,7)
+        net.load_state_dict(torch.load(path_to_model))
+        # feature_extractor = AutoFeatureExtractor.from_pretrained("kmewhort/resnet34-sketch-classifier")
+        # net = ResNetForImageClassification.from_pretrained("kmewhort/resnet34-sketch-classifier")
 
     net.to(device)
     net.eval()

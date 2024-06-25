@@ -309,7 +309,7 @@ class DeepInversionClass(object):
                 net_teacher.zero_grad()
 
                 outputs = net_teacher(inputs_jit)
-                outputs = self.network_output_function(outputs).logits
+                outputs = self.network_output_function(outputs)
 
                 # R_cross classification loss
                 loss = criterion(outputs, targets)
