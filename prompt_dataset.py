@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 
 
 imagenet_templates_small = [
-    "A photo of {}",
+    "A {}",
     #"a high resolution realistic image of {}",
     #"A close-up photo of a {}",
     #"A rendition of a {}",
